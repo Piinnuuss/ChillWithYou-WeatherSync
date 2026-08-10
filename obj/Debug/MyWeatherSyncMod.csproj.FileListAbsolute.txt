@@ -1,0 +1,9 @@
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\bin\Debug\MyWeatherSyncMod.dll
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\bin\Debug\MyWeatherSyncMod.pdb
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\bin\Debug\Newtonsoft.Json.dll
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\bin\Debug\Newtonsoft.Json.xml
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\obj\Debug\MyWeatherSyncMod.csproj.AssemblyReference.cache
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\obj\Debug\MyWeatherSyncMod.csproj.CoreCompileInputs.cache
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\obj\Debug\MyWeathe.863BE47E.Up2Date
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\obj\Debug\MyWeatherSyncMod.dll
+D:\vscodework\MyWeatherSyncMod\MyWeatherSyncMod\obj\Debug\MyWeatherSyncMod.pdb
