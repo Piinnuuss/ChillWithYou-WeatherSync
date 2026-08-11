@@ -97,21 +97,31 @@ namespace MyWeatherSyncMod
         {
             var data = await _weatherFetcher.FetchAsync();
             var weatherEnv = WeatherMapper.GetWeatherEnvironment(data.WeatherCode);
-
-            // 判断当前是否为白天（日出到日落之间）
             var now = DateTime.Now;
-            bool isDay = now > data.Sunrise && now < data.Sunset;
 
-            // 有降水且在白天 -> 强制多云；否则不强制（夜晚下雨保留夜景）
-            bool forceCloudy = weatherEnv.HasValue && isDay;
+            // 判断当前时段
+            var timeOfDay = TimeSyncManager.GetTimeOfDay(data.Sunrise, data.Sunset);
+            bool isDayPeriod = timeOfDay == TimeOfDay.Morning || timeOfDay == TimeOfDay.Day || timeOfDay == TimeOfDay.Afternoon;
+            bool isDusk = timeOfDay == TimeOfDay.Dusk;
 
-            Log.LogInfo($"[Sync] Code:{data.WeatherCode} Temp:{data.Temperature}°C → Weather:{weatherEnv?.ToString() ?? "Clear"}, ForceCloudy:{forceCloudy} (isDay:{isDay})");
+            // 判断天气类型
+            bool isRain = weatherEnv.HasValue && (WeatherMapper.IsRain(weatherEnv.Value));
+            bool isSnow = weatherEnv.HasValue && WeatherMapper.IsSnow(weatherEnv.Value);
 
-            // 应用天气（下雨时根据白天/黑夜决定是否多云背景）
+            // 决定是否强制多云背景
+            bool forceCloudy = false;
+            if (isDayPeriod && (isRain || isSnow)) forceCloudy = true;
+            else if (isDusk && isSnow) forceCloudy = true;
+            // 夜晚从不强制多云
+
+            Log.LogInfo($"[Sync] Code:{data.WeatherCode} Temp:{data.Temperature}°C → Weather:{weatherEnv?.ToString() ?? "Clear"}");
+            Log.LogInfo($"[Sync] TimeOfDay:{timeOfDay}, forceCloudy:{forceCloudy} (isDay:{isDayPeriod}, isDusk:{isDusk}, Rain:{isRain}, Snow:{isSnow})");
+
+            // 应用天气（根据 forceCloudy 决定是否多云背景）
             if (ConfigManager.EnableWeatherSync.Value)
                 EnvironmentApplier.ApplyPrecipitation(weatherEnv, forceCloudy);
 
-            // 仅晴天时更新日出日落时间节点（如果多云/下雨且白天强制多云，时间被固定为多云，不需更新时间节点）
+            // 仅当不强制多云时（晴天、黄昏/夜晚下雨等），更新日出日落时间节点
             if (ConfigManager.EnableTimeSync.Value && !forceCloudy)
                 UpdateTimeNodes(data.Sunrise, data.Sunset);
 

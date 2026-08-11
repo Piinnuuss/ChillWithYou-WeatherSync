@@ -11,29 +11,42 @@ namespace MyWeatherSyncMod
 
         public static void ApplyPrecipitation(EnvironmentType? weatherType, bool forceCloudy)
         {
-            if (forceCloudy && weatherType.HasValue)
-                EnablePrecipitation(weatherType.Value);
+            if (weatherType.HasValue)
+                EnablePrecipitation(weatherType.Value, forceCloudy);
             else
                 DisablePrecipitation();
         }
 
-        private static void EnablePrecipitation(EnvironmentType weatherType)
+        private static void EnablePrecipitation(EnvironmentType weatherType, bool forceCloudy)
         {
-            if (!_isPrecipitating)
+            if (forceCloudy)
             {
-                SetAutoTimeSwitch(false);
-                Plugin.Log.LogInfo("Auto time switch disabled for precipitation.");
+                // 白天强制多云
+                if (!_isPrecipitating)
+                {
+                    SetAutoTimeSwitch(false);
+                    Plugin.Log.LogInfo("Auto time switch disabled for daytime precipitation.");
+                }
+
+                try
+                {
+                    RoomLifetimeScope.Resolve<WindowViewService>().ChangeWeatherAndTime(WindowViewType.Cloudy);
+                    Plugin.Log.LogInfo("Time background set to Cloudy (daytime rain).");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"Set Cloudy failed: {ex.Message}"); }
+            }
+            else
+            {
+                // 夜晚或晴天：确保自动时间开启并立即应用当前时间窗景（覆盖之前的多云）
+                if (_isPrecipitating || !IsAutoTimeEnabled())
+                {
+                    SetAutoTimeSwitch(true);
+                    ApplyCurrentTimeWindow();
+                    Plugin.Log.LogInfo("Time background restored to current time period.");
+                }
             }
 
-            // 1. 多云背景
-            try
-            {
-                RoomLifetimeScope.Resolve<WindowViewService>().ChangeWeatherAndTime(WindowViewType.Cloudy);
-                Plugin.Log.LogInfo("Time background set to Cloudy.");
-            }
-            catch (Exception ex) { Plugin.Log.LogError($"Set Cloudy failed: {ex.Message}"); }
-
-            // 2. 天气窗景（雨/雪视觉）
+            // 激活天气窗景（雨/雪视觉）
             if (ConfigManager.PreferFullWeather.Value &&
                 weatherType.TryConvertToWindowViewType(out WindowViewType wvType))
             {
@@ -50,7 +63,7 @@ namespace MyWeatherSyncMod
                 catch (Exception ex) { Plugin.Log.LogError($"Weather window failed: {ex.Message}"); }
             }
 
-            // 3. 声音激活（直接通过控制器驱动，确保立即出声）
+            // 激活降水声音
             if (weatherType != EnvironmentType.Snow &&
                 weatherType.TryConvertToAmbientSoundType(out AmbientSoundType asType))
             {
@@ -86,14 +99,23 @@ namespace MyWeatherSyncMod
         private static void DisablePrecipitation()
         {
             if (!_isPrecipitating) return;
+
             SetAutoTimeSwitch(true);
+            ApplyCurrentTimeWindow();
             MuteAllPrecipitationSounds();
             DeactivateAllWeatherWindows();
 
+            Plugin.Log.LogInfo("Precipitation disabled, time background restored.");
+            _isPrecipitating = false;
+        }
+
+        private static void ApplyCurrentTimeWindow()
+        {
             try
             {
                 var changer = UnityEngine.Object.FindObjectOfType<AutoTimeWindowViewChanger>();
-                if (changer != null) changer.ApplyTimeOfDayFromCurrentTime();
+                if (changer != null)
+                    changer.ApplyTimeOfDayFromCurrentTime();
                 else
                 {
                     var saveData = SaveDataManager.Instance;
@@ -103,11 +125,17 @@ namespace MyWeatherSyncMod
                     var wvType = settings.GetWindowViewTypeFromTime(now);
                     RoomLifetimeScope.Resolve<WindowViewService>().ChangeWeatherAndTime(wvType);
                 }
-                Plugin.Log.LogInfo("Time background restored.");
             }
-            catch (Exception ex) { Plugin.Log.LogError($"Restore failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogError($"Apply current time window failed: {ex.Message}"); }
+        }
 
-            _isPrecipitating = false;
+        private static bool IsAutoTimeEnabled()
+        {
+            try
+            {
+                return SaveDataManager.Instance.AutoTimeWindowChangeData.IsActiveAuto.Value;
+            }
+            catch { return false; }
         }
 
         private static void SetAutoTimeSwitch(bool enabled)
