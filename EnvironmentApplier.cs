@@ -21,7 +21,6 @@ namespace MyWeatherSyncMod
         {
             if (forceCloudy)
             {
-                // 白天强制多云
                 if (!_isPrecipitating)
                 {
                     SetAutoTimeSwitch(false);
@@ -31,13 +30,12 @@ namespace MyWeatherSyncMod
                 try
                 {
                     RoomLifetimeScope.Resolve<WindowViewService>().ChangeWeatherAndTime(WindowViewType.Cloudy);
-                    Plugin.Log.LogInfo("Time background set to Cloudy (daytime rain).");
+                    Plugin.Log.LogInfo("Time background set to Cloudy.");
                 }
                 catch (Exception ex) { Plugin.Log.LogError($"Set Cloudy failed: {ex.Message}"); }
             }
             else
             {
-                // 夜晚或晴天：确保自动时间开启并立即应用当前时间窗景（覆盖之前的多云）
                 if (_isPrecipitating || !IsAutoTimeEnabled())
                 {
                     SetAutoTimeSwitch(true);
@@ -46,7 +44,7 @@ namespace MyWeatherSyncMod
                 }
             }
 
-            // 激活天气窗景（雨/雪视觉）
+            // 天气窗景（雨/雪视觉）
             if (ConfigManager.PreferFullWeather.Value &&
                 weatherType.TryConvertToWindowViewType(out WindowViewType wvType))
             {
@@ -63,7 +61,7 @@ namespace MyWeatherSyncMod
                 catch (Exception ex) { Plugin.Log.LogError($"Weather window failed: {ex.Message}"); }
             }
 
-            // 激活降水声音
+            // 声音激活
             if (weatherType != EnvironmentType.Snow &&
                 weatherType.TryConvertToAmbientSoundType(out AmbientSoundType asType))
             {
@@ -155,33 +153,60 @@ namespace MyWeatherSyncMod
         private static void MuteAllPrecipitationSounds()
         {
             var types = new[] { EnvironmentType.LightRain, EnvironmentType.HeavyRain, EnvironmentType.ThunderRain };
-            try
+            var data = RoomLifetimeScope.Resolve<EnvironmentDataService>();
+            var controllers = Resources.FindObjectsOfTypeAll<EnvironmentController>();
+
+            foreach (var t in types)
             {
-                var data = RoomLifetimeScope.Resolve<EnvironmentDataService>();
-                foreach (var t in types)
+                AmbientSoundType st;
+                if (t.TryConvertToAmbientSoundType(out st))
                 {
-                    AmbientSoundType st;
-                    if (t.TryConvertToAmbientSoundType(out st))
-                        try { data.SetMute(st, true); } catch { }
+                    try { data.SetMute(st, true); } catch { }
+                }
+
+                // 同时直接操作匹配的控制器，确保声音立即停止
+                foreach (var ctrl in controllers)
+                {
+                    if (ctrl.EnvironmentType == t)
+                    {
+                        try
+                        {
+                            ctrl.MuteActivate();
+                            ctrl.ChangeVolume(0f);
+                        }
+                        catch { }
+                    }
                 }
             }
-            catch { }
         }
 
         private static void DeactivateAllWeatherWindows()
         {
             var types = new[] { EnvironmentType.LightRain, EnvironmentType.HeavyRain, EnvironmentType.ThunderRain, EnvironmentType.Snow };
-            try
+            var data = RoomLifetimeScope.Resolve<EnvironmentDataService>();
+            var controllers = Resources.FindObjectsOfTypeAll<EnvironmentController>();
+
+            foreach (var t in types)
             {
-                var data = RoomLifetimeScope.Resolve<EnvironmentDataService>();
-                foreach (var t in types)
+                WindowViewType wvt;
+                if (t.TryConvertToWindowViewType(out wvt))
                 {
-                    WindowViewType wvt;
-                    if (t.TryConvertToWindowViewType(out wvt))
-                        try { data.SetViewActive(wvt, false); } catch { }
+                    try { data.SetViewActive(wvt, false); } catch { }
+                }
+
+                // 直接操作匹配的控制器，强制关闭窗景视觉
+                foreach (var ctrl in controllers)
+                {
+                    if (ctrl.EnvironmentType == t)
+                    {
+                        try
+                        {
+                            ctrl.ChangeWindowView(ChangeType.Deactivate);
+                        }
+                        catch { }
+                    }
                 }
             }
-            catch { }
         }
     }
 }
