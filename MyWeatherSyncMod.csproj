@@ -82,6 +82,10 @@
       <HintPath>..\..\..\SteamLibrary\steamapps\common\Chill with You Lo-Fi Story\Chill With You_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>..\..\..\SteamLibrary\steamapps\common\Chill with You Lo-Fi Story\Chill With You_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="VContainer">
       <HintPath>..\..\..\SteamLibrary\steamapps\common\Chill with You Lo-Fi Story\Chill With You_Data\Managed\VContainer.dll</HintPath>
       <Private>False</Private>
@@ -96,6 +100,7 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="WeatherFetcher.cs" />
     <Compile Include="WeatherMapper.cs" />
+    <Compile Include="WeatherSyncRunner.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

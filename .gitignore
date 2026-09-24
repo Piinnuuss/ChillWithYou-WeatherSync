@@ -1,5 +1,12 @@
-"" 
-"# Visual Studio build output" 
-"bin/" 
-"obj/" 
-"Properties/" 
+# Visual Studio / Rider
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# 编译产物
+bin/
+obj/
+
+# NuGet 还原目录（Newtonsoft.Json 由 packages.config 还原）
+packages/
