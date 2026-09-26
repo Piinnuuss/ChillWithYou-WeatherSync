@@ -13,6 +13,8 @@ namespace MyWeatherSyncMod
         public static ConfigEntry<int> RefreshMinutes;
         public static ConfigEntry<bool> AutoLocate;
         public static ConfigEntry<bool> PreferFullWeather;
+        public static ConfigEntry<int> WeatherLookAheadHours;
+        public static ConfigEntry<double> WeatherGridRadius;
 
         public static void Init(ConfigFile cfg)
         {
@@ -32,6 +34,19 @@ namespace MyWeatherSyncMod
                 "Automatically detect location using IP. Disable to use manual coordinates.");
             RefreshMinutes = cfg.Bind("Update", "RefreshMinutes", 30,
                 "Weather refresh interval in minutes (minimum 5)");
+            WeatherLookAheadHours = cfg.Bind("Update", "WeatherLookAheadHours", 3,
+                new ConfigDescription(
+                    "How many hours ahead to look when deciding whether it is raining. " +
+                    "Prevents missing intermittent rain that falls between two samples. " +
+                    "0 = judge only by the current hour. Range 0-24.",
+                    new AcceptableValueRange<int>(0, 24)));
+            WeatherGridRadius = cfg.Bind("Update", "WeatherGridRadius", 0.09,
+                new ConfigDescription(
+                    "Radius (in degrees) of the sampling grid around your coordinate. " +
+                    "0.09 deg is about 10km. Compensates for IP-based location error; " +
+                    "rain is treated as active if ANY point in the grid reports it. " +
+                    "0 = query the single coordinate only.",
+                    new AcceptableValueRange<double>(0.0, 1.0)));
         }
 
         /// <summary>把当前配置写回磁盘（自动定位成功后调用）。</summary>

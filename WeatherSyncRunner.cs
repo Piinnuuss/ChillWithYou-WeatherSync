@@ -137,6 +137,7 @@ namespace MyWeatherSyncMod
 
             Plugin.Log.LogInfo($"[Sync] Code:{data.WeatherCode} ({WeatherMapper.Describe(data.WeatherCode)}) " +
                                $"Temp:{data.Temperature:F1}°C → 降水:{weatherEnv?.ToString() ?? "none"}");
+            Plugin.Log.LogInfo($"[Sync] {WeatherFetcher.DescribeWindow(data)}");
             Plugin.Log.LogInfo($"[Sync] TimeOfDay:{timeOfDay}, forceCloudy:{forceCloudy} " +
                                $"(isDay:{isDayPeriod}, Rain:{isRain}, Snow:{isSnow}, " +
                                $"EnableWeatherSync:{ConfigManager.EnableWeatherSync.Value})");
@@ -170,7 +171,15 @@ namespace MyWeatherSyncMod
                 double lon = ConfigManager.Longitude.Value;
                 if (lat == 0.0 && lon == 0.0)
                     lon = WeatherFetcher.DefaultLon; // 首次启动时 lat 为 0，给个合理经度避免落到 (0,0)
-                return new WeatherFetcher(lat, lon);
+
+                int lookAhead = ConfigManager.WeatherLookAheadHours != null
+                    ? ConfigManager.WeatherLookAheadHours.Value
+                    : 3;
+                double gridRadius = ConfigManager.WeatherGridRadius != null
+                    ? ConfigManager.WeatherGridRadius.Value
+                    : 0.09;
+
+                return new WeatherFetcher(lat, lon, lookAhead, gridRadius);
             }
             catch (Exception ex)
             {

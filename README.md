@@ -57,14 +57,50 @@
 | 设置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `RefreshMinutes` | int | `30` | 检测间隔（分钟）。程序内部下限为 5 分钟 |
+| `WeatherLookAheadHours` | int | `3` | 判定「是否在下雨」时往后看几小时（0–24），见下节 |
+| `WeatherGridRadius` | double | `0.09` | 采样网格半径（度），`0.09` ≈ 10km，见下节 |
 
 > ⚠️ 坐标为 `0,0` 或超出范围时会被替换为默认值，避免请求落到几内亚湾。
 
 ---
 
-## 🌤️ 天气映射规则
+## 🌤️ 天气判定逻辑
 
-使用 WMO weather code（Open-Meteo 标准）：
+### 为什么不用 `current.weather_code`
+
+早期版本直接读 Open-Meteo 的 `current`（瞬时快照），有两个实测出来的问题：
+
+**问题 1：瞬时值会漏判间歇性降雨**
+
+雨是断断续续的，而插件每 30 分钟才采样一次，很容易正好落在两场雨的间隙里。
+实测 12:48 时 `current.weather_code=3`（阴）、`precipitation=0.00mm`，
+但 `hourly` 显示 15:00 起有降水 —— 只看瞬时值必然判成晴天。
+
+→ **改为在 `hourly` 序列上取窗口：前 1 小时 ~ 后 `WeatherLookAheadHours` 小时**。
+窗口内任意一小时满足「降水量 ≥ 0.1mm」或「降水概率 ≥ 60%」即视为降水。
+
+**问题 2：IP 定位的坐标本身不准**
+
+实测插件通过 IP 拿到的 `31.3093, 120.6020` 与江阴市中心 `31.92, 120.28` 相差约 70km，
+同一时刻气温 `31.5°C` vs `26.1°C`、降水 `0.00mm` vs `0.70mm`
+—— 在错误的点上查天气，后面判得再对也是错的。
+
+→ **改为在坐标周围取 3×3 网格**（Open-Meteo 支持一次请求多个坐标，仍然只发一个请求），
+任意一点判定为降水即按降水处理。气温取离请求坐标最近的采样点。
+
+### 参数怎么调
+
+| 想要的效果 | 怎么调 |
+|-----------|--------|
+| 更早开启雨景（预报式，提前知道要下雨） | 调大 `WeatherLookAheadHours`（如 `6`） |
+| 只在真正下雨时才开雨景（严格实时） | 调小 `WeatherLookAheadHours`（`0` = 只看当前小时） |
+| IP 定位偏差大、想让判定更宽松 | 调大 `WeatherGridRadius`（如 `0.2` ≈ 22km） |
+| 已有精确坐标、不想被周边天气影响 | `WeatherGridRadius = 0`，并手动填精确经纬度 |
+
+> 💡 如果你的 IP 定位明显偏离实际位置，**最有效的做法是直接手动填经纬度**
+> （地图上右键即可复制），再把 `AutoLocate` 设为 `false`。
+
+### WMO 天气码映射
 
 | WMO 代码 | 含义 | 游戏内表现 |
 |----------|------|-----------|
@@ -98,16 +134,19 @@
 ### 正常启动的样子
 
 ```
-[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.2.1]
+[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.3.0]
 [Info :Real-Time Weather Sync] === AWAKE START ===
 [Info :Real-Time Weather Sync] [SyncLoop] 循环已启动，10s 后开始检测……
 [Info :Real-Time Weather Sync] Auto-located: 31.3093, 120.6020
-[Info :Real-Time Weather Sync] [Sync] Code:2 (PartlyCloudy) Temp:26.1°C → 降水:none
-[Info :Real-Time Weather Sync] [Sync] TimeOfDay:Night, forceCloudy:False (...)
-[Info :Real-Time Weather Sync] [Apply] 当地无降水，关闭窗景：HeavyRain → 无
-[Info :Real-Time Weather Sync] [Apply] 已关闭 HeavyRain（场景关闭=True）
+[Info :Real-Time Weather Sync] [Sync] Code:95 (Thunderstorm) Temp:31.5°C → 降水:ThunderRain
+[Info :Real-Time Weather Sync] [Sync] 9点网格 | 当前小时 #1 12时*2/0mm/4% | #2 12时*2/0mm/4% | ...
+[Info :Real-Time Weather Sync] [Sync] TimeOfDay:Day, forceCloudy:True (...)
+[Info :Real-Time Weather Sync] [Apply] 降水窗景已激活：ThunderRain
 [Info :Real-Time Weather Sync] [Sync] Done.
 ```
+
+其中 `9点网格 | 当前小时 #N 12时*code/mm/prob%` 这行是关键诊断信息，
+`*` 标记的就是当前小时，可以直接看出判定依据来自哪个采样点的哪个小时。
 
 ### 常见问题
 
@@ -117,6 +156,8 @@
 | 没有 `[SyncLoop] 循环已启动` | 插件没加载成功，检查 BepInEx 版本与 DLL 是否放在 `plugins/` |
 | 一直刷 `VContainer 尚未就绪` | 还没进入房间场景，属正常；进入后会自行开始检测 |
 | `[Sync] 天气请求失败，本次跳过` | 网络问题或 Open-Meteo 不可达，会保持当前窗景，下一轮重试 |
+| 天气跟实际不符 | 先看日志里的 `Auto-located` 坐标是否接近你的真实位置，偏差大就手动填经纬度并关掉 `AutoLocate` |
+| 判定太保守/太激进 | 调 `WeatherLookAheadHours`（时间窗口）和 `WeatherGridRadius`（空间范围） |
 | `已关闭 X（场景关闭=False）` | 场景侧关闭失败，请附日志提 issue |
 | `状态不一致 X: 场景=True 存档=False` | 检测到历史遗留的不一致状态，插件会自动清理，属正常自愈 |
 
@@ -166,6 +207,12 @@
   `EnvironmentDataService.IsWindowActive`），不要用插件自己缓存的布尔值 ——
   玩家手动开的雨，缓存里是不知道的。
 - **`forceCloudy` 只在白天/黄昏下雪生效**，夜晚保持夜景。
+- **天气判定不要只看瞬时值**。`current.weather_code` 是某一刻的快照，
+  间歇性降雨会被完全漏掉；要在 `hourly` 上取时间窗口。
+  同理，IP 定位给的坐标有几十公里误差，单点查询可能查到完全不同的天气。
+- **Open-Meteo 支持一次请求多个坐标**（`latitude=a,b,c&longitude=x,y,z`），
+  此时响应是**数组**而不是对象，且返回顺序**不保证** ——
+  需要哪个点的数据要按经纬度距离匹配，不能写死索引。
 
 ---
 
