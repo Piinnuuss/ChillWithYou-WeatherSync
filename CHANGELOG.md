@@ -1,5 +1,38 @@
 # 更新日志
 
+## v1.3.1
+
+### 变更
+
+- **插件不再读写游戏自己的「自动时间窗景」开关**（`AutoTimeWindowChangeData.IsActiveAuto`）。
+  那个开关属于玩家设置，插件改动它就是篡改用户偏好。
+
+  之所以要改：游戏自身的 `AutoTimeWindowViewChanger.ApplyTimeOfDayFromCurrentTime()`
+  第一行就是 `if (!IsActiveAuto) return;` —— 玩家关掉该开关时它完全无效。
+  旧实现为了绕开这一点去改开关，方向错了。
+
+  现在插件改为**自己按真实时钟计算**该用哪个时间窗景
+  （`SaveDataManager.AutoTimeWindowChangeData` 的时间节点 + `DateTime.Now`），
+  因此无论玩家那个开关是开是关，时间窗景都会跟随真实时间。
+  实测审计：编译产物中对 `IsActiveAuto` 的读写次数为 **0**。
+
+  ⇒ 上一版为持久化"插件关过自动时间"而加的配置项
+  `[Internal] AutoTimeDisabledByPlugin` 随之废弃并删除（该机制已不需要）。
+
+### 新增
+
+- **保护玩家自定义窗景**：每次同步先查询当前激活的是不是时间类窗景
+  （Day / Sunset / Night / Cloudy）。如果不是（烟花 / 樱花 / 深海等玩家自选窗景），
+  插件只处理雨雪与环境音，**完全不碰背景**。
+- **不强开未解锁的窗景**：夜晚等时间窗景需要解锁，切换前用
+  `UnlockEnvironment.GetLockState(EnvironmentType).IsLocked` 检查。
+  查询失败时返回"不阻拦"，避免整个时间同步因一次异常而瘫痪。
+- 背景切换日志做了去重（`LogBackgroundOnce`），避免每个检测周期重复刷屏。
+
+### 移除
+
+- 死代码：`WeatherMapper.GetTimeEnvironment()`（自 `forceCloudy` 重构后已无调用方）。
+
 ## v1.3.0
 
 ### 修复

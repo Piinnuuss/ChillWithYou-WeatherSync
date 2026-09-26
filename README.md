@@ -114,16 +114,36 @@
 | `71` `73` `75` `77` `85` `86` | 降雪 / 阵雪 | 雪 |
 | `95` `96` `99` | 雷暴 | 雷雨 |
 
+> 游戏里雨的窗景只有 3 个（`LightRain` / `HeavyRain` / `ThunderRain`），
+> 所以 WMO 的 6 档雨强会**归并**进这 3 个桶：大雨(65)、暴雨(82) 都归到「雨」。
+
 ### 背景切换规则
 
-降水发生时，**仅在以下情况**把时间窗景背景换成多云：
+**① 时间窗景跟随真实时间**
 
-- 白天（早晨 / 白天 / 下午）有雨或雪
-- 黄昏且下雪
+插件按存档里的时间节点（`TimeDayStart` / `TimeSunsetStart` / `TimeNightStart`）
+加上真实时钟，算出当前该用哪个时间窗景（Day / Sunset / Night），每轮同步刷新。
 
-**夜晚永远不强制多云** —— 雨雪直接叠加在夜景之上，保留原版夜晚窗景。
+> 插件**不读写游戏自己的「自动时间窗景」开关**（`IsActiveAuto`）—— 那是你的设置。
+> 因为游戏自带的 `ApplyTimeOfDayFromCurrentTime()` 在该开关关闭时会直接 return，
+> 插件改为自己计算，所以无论那个开关开着还是关着，时间窗景都会跟随真实时间。
 
-如果你自己关闭了「自动时间窗景」，插件不会去覆盖你的手动选择，只负责下雨。
+**② 白天降水 → 多云背景**
+
+- 白天（早晨 / 白天 / 下午）有雨或雪 → 背景换成 `Cloudy`
+- 黄昏且下雪 → 换成 `Cloudy`
+- **夜晚永远不换成多云** —— 雨雪直接叠加在夜景之上
+
+降水结束后，背景自动切回真实时间对应的窗景。
+
+**③ 绝不覆盖你的自定义窗景**
+
+插件每次同步先查询当前激活的是不是时间类窗景。如果是**烟花 / 樱花 / 深海**等
+你自己选的窗景，插件**只处理雨雪与环境音，完全不碰背景**。
+
+**④ 不强开未解锁的窗景**
+
+夜晚等时间窗景需要解锁，未解锁时保持当前窗景并记录日志。
 
 ---
 
@@ -134,19 +154,30 @@
 ### 正常启动的样子
 
 ```
-[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.3.0]
+[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.3.1]
 [Info :Real-Time Weather Sync] === AWAKE START ===
 [Info :Real-Time Weather Sync] [SyncLoop] 循环已启动，10s 后开始检测……
 [Info :Real-Time Weather Sync] Auto-located: 31.3093, 120.6020
 [Info :Real-Time Weather Sync] [Sync] Code:95 (Thunderstorm) Temp:31.5°C → 降水:ThunderRain
-[Info :Real-Time Weather Sync] [Sync] 9点网格 | 当前小时 #1 12时*2/0mm/4% | #2 12时*2/0mm/4% | ...
-[Info :Real-Time Weather Sync] [Sync] TimeOfDay:Day, forceCloudy:True (...)
+[Info :Real-Time Weather Sync] [Sync] 9点网格 | 当前小时 #5 12时*3/0mm/4% | ...
+[Info :Real-Time Weather Sync] [Sync] TimeOfDay:Day, forceCloudy:True, isDay:True
 [Info :Real-Time Weather Sync] [Apply] 降水窗景已激活：ThunderRain
+[Info :Real-Time Weather Sync] [Apply] 白天有降水，背景已切换为 Cloudy。
 [Info :Real-Time Weather Sync] [Sync] Done.
 ```
 
-其中 `9点网格 | 当前小时 #N 12时*code/mm/prob%` 这行是关键诊断信息，
-`*` 标记的就是当前小时，可以直接看出判定依据来自哪个采样点的哪个小时。
+关键诊断信息有两处：
+
+- `9点网格 | 当前小时 #N 12时*code/mm/prob%` —— `*` 标记当前小时，`#N` 是采样点序号
+  （`#5` 是中心点），可以直接看出判定依据来自哪个点的哪个小时。
+- `[Apply]` 开头的行 —— 说明本次对窗景做了什么。常见的有：
+
+| 日志 | 含义 |
+|------|------|
+| `背景按真实时间切换为 Day/Sunset/Night。` | 时间窗景跟随真实时间 |
+| `白天有降水，背景已切换为 Cloudy。` | 白天降水 → 多云 |
+| `当前是玩家自定义窗景（烟花/樱花等），不覆盖，只处理雨雪。` | 保护你的自定义窗景 |
+| `时间窗景 xxx 尚未解锁，保持当前窗景。` | 该窗景未解锁，不强开 |
 
 ### 常见问题
 
@@ -158,6 +189,7 @@
 | `[Sync] 天气请求失败，本次跳过` | 网络问题或 Open-Meteo 不可达，会保持当前窗景，下一轮重试 |
 | 天气跟实际不符 | 先看日志里的 `Auto-located` 坐标是否接近你的真实位置，偏差大就手动填经纬度并关掉 `AutoLocate` |
 | 判定太保守/太激进 | 调 `WeatherLookAheadHours`（时间窗口）和 `WeatherGridRadius`（空间范围） |
+| 窗景不跟时间走 | 看是否有 `保留自定义窗景` —— 说明当前是樱花/烟花等，插件按设计不覆盖。切回时间窗景即可恢复 |
 | `已关闭 X（场景关闭=False）` | 场景侧关闭失败，请附日志提 issue |
 | `状态不一致 X: 场景=True 存档=False` | 检测到历史遗留的不一致状态，插件会自动清理，属正常自愈 |
 
@@ -213,6 +245,13 @@
 - **Open-Meteo 支持一次请求多个坐标**（`latitude=a,b,c&longitude=x,y,z`），
   此时响应是**数组**而不是对象，且返回顺序**不保证** ——
   需要哪个点的数据要按经纬度距离匹配，不能写死索引。
+- **不要去改游戏自己的「自动时间窗景」开关**（`AutoTimeWindowChangeData.IsActiveAuto`）。
+  那是玩家设置。而 `AutoTimeWindowViewChanger.ApplyTimeOfDayFromCurrentTime()` 第一行就是
+  `if (!IsActiveAuto) return;` —— 开关关着时它无效，所以插件必须自己按真实时钟算窗景。
+- **改背景前先确认当前是不是时间类窗景**（Day/Sunset/Night/Cloudy 四者互斥）。
+  玩家自选的烟花/樱花等不能被覆盖。
+- **时间窗景需要解锁**（夜晚等），切换前用
+  `UnlockEnvironment.GetLockState(EnvironmentType).IsLocked` 检查，未解锁不要强开。
 
 ---
 

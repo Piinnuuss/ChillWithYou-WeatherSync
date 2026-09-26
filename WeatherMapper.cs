@@ -8,13 +8,28 @@ namespace MyWeatherSyncMod
         /// 把 Open-Meteo 的 WMO weather_code 映射为“降水类”窗景。
         /// 返回 null 表示当前没有降水（晴 / 少云 / 阴 / 雾），此时必须关闭所有雨雪窗景。
         ///
+        /// 【重要】游戏里雨的窗景只有 3 个（已由 WindowViewService 反编译确认）：
+        ///     WindowViewType 6 = LightRain   → 小雨
+        ///     WindowViewType 7 = HeavyRain   → 雨（游戏没有单独的“大雨/暴雨”窗景）
+        ///     WindowViewType 8 = ThunderRain → 雷雨
+        ///   所以 WMO 的 6 档雨强必须【归并】进这 3 个桶，
+        ///   “大雨(65)”“暴雨(82)”都进 HeavyRain，不会各自变成一个窗景。
+        ///
+        /// 归并规则：
+        ///   小雨  : 51/53/55 毛毛雨、56/57 冻雨、80 小阵雨
+        ///   雨    : 61/63/65 雨（含大雨）、66/67 冻雨、81/82 阵雨（含暴雨）
+        ///   雷雨  : 95/96/99 雷暴
+        ///   雪    : 71/73/75/77 降雪、85/86 阵雪
+        ///   无降水: 0/1/2/3 晴~阴、45/48 雾
+        ///
         /// WMO 代码速查：
         ///   0  Clear sky            1  Mainly clear        2  Partly cloudy      3  Overcast
         ///  45/48 Fog
         ///  51/53/55 Drizzle        56/57 Freezing drizzle
-        ///  61/63/65 Rain           66/67 Freezing rain
+        ///  61/63/65 Rain (61 小 / 63 中 / 65 大)
+        ///  66/67 Freezing rain
         ///  71/73/75 Snow fall      77 Snow grains
-        ///  80/81/82 Rain showers
+        ///  80/81/82 Rain showers (80 小 / 81 中 / 82 暴)
         ///  85/86 Snow showers
         ///  95 Thunderstorm         96/99 Thunderstorm with hail
         /// </summary>
@@ -22,26 +37,24 @@ namespace MyWeatherSyncMod
         {
             switch (weatherCode)
             {
-                // ---- 毛毛雨 / 冻雨 ----
+                // ---- 小雨：毛毛雨 / 冻雨 / 小阵雨 ----
                 case 51: case 53: case 55:
                 case 56: case 57:
+                case 80:
                     return EnvironmentType.LightRain;
 
-                // ---- 降雨 / 冻雨 ----
+                // ---- 雨：降雨(含大雨) / 冻雨 / 阵雨(含暴雨) ----
                 case 61: case 63: case 65:
                 case 66: case 67:
+                case 81: case 82:
                     return EnvironmentType.HeavyRain;
 
-                // ---- 阵雨（原来 80/81/82 全给了 HeavyRain，这里按强度区分）----
-                case 80: return EnvironmentType.LightRain;
-                case 81: case 82: return EnvironmentType.HeavyRain;
-
-                // ---- 降雪 / 阵雪 ----
+                // ---- 雪：降雪 / 阵雪 ----
                 case 71: case 73: case 75: case 77:
                 case 85: case 86:
                     return EnvironmentType.Snow;
 
-                // ---- 雷暴 ----
+                // ---- 雷雨：雷暴 ----
                 case 95: case 96: case 99:
                     return EnvironmentType.ThunderRain;
 
@@ -68,7 +81,10 @@ namespace MyWeatherSyncMod
             }
         }
 
-        /// <summary>给日志用的可读描述（避免把所有 null 都打印成 "Clear" 造成误判）。</summary>
+        /// <summary>
+        /// 给日志用的可读描述。直接标出归并后的游戏窗景，
+        /// 这样日志里出现“雨”时能一眼看出它是哪几档 WMO 合并来的。
+        /// </summary>
         public static string Describe(int weatherCode)
         {
             switch (weatherCode)
@@ -78,12 +94,37 @@ namespace MyWeatherSyncMod
                 case 2: return "PartlyCloudy";
                 case 3: return "Overcast";
                 case 45: case 48: return "Fog";
-                case 51: case 53: case 55: case 56: case 57: return "Drizzle";
-                case 61: case 63: case 65: case 66: case 67: return "Rain";
-                case 71: case 73: case 75: case 77: return "Snow";
-                case 80: case 81: case 82: return "RainShowers";
-                case 85: case 86: return "SnowShowers";
-                case 95: case 96: case 99: return "Thunderstorm";
+
+                // 小雨
+                case 51: return "Drizzle(小雨)";
+                case 53: return "Drizzle(小雨)";
+                case 55: return "Drizzle(小雨)";
+                case 56: return "FreezingDrizzle(小雨)";
+                case 57: return "FreezingDrizzle(小雨)";
+                case 80: return "RainShowers-slight(小雨)";
+
+                // 雨（含大雨/暴雨，全部归到同一个窗景）
+                case 61: return "Rain-slight(雨)";
+                case 63: return "Rain-moderate(雨)";
+                case 65: return "Rain-heavy(雨)";
+                case 66: return "FreezingRain(雨)";
+                case 67: return "FreezingRain(雨)";
+                case 81: return "RainShowers-moderate(雨)";
+                case 82: return "RainShowers-violent(雨)";
+
+                // 雪
+                case 71: return "Snow-slight(雪)";
+                case 73: return "Snow-moderate(雪)";
+                case 75: return "Snow-heavy(雪)";
+                case 77: return "SnowGrains(雪)";
+                case 85: return "SnowShowers(雪)";
+                case 86: return "SnowShowers(雪)";
+
+                // 雷雨
+                case 95: return "Thunderstorm(雷雨)";
+                case 96: return "Thunderstorm-hail(雷雨)";
+                case 99: return "Thunderstorm-hail(雷雨)";
+
                 default: return "Unknown(" + weatherCode + ")";
             }
         }
@@ -108,19 +149,5 @@ namespace MyWeatherSyncMod
             EnvironmentType.ThunderRain,
             EnvironmentType.Snow,
         };
-
-        public static EnvironmentType GetTimeEnvironment(TimeOfDay timeOfDay)
-        {
-            switch (timeOfDay)
-            {
-                case TimeOfDay.Morning:
-                case TimeOfDay.Day:
-                case TimeOfDay.Afternoon: return EnvironmentType.Day;
-                case TimeOfDay.Dusk: return EnvironmentType.Sunset;
-                case TimeOfDay.Night:
-                case TimeOfDay.LateNight: return EnvironmentType.Night;
-                default: return EnvironmentType.Day;
-            }
-        }
     }
 }

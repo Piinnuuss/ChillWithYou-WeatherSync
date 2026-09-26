@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace MyWeatherSyncMod
 {
-    [BepInPlugin("com.yourname.weathersync", "Real-Time Weather Sync", "1.3.0")]
+    [BepInPlugin("com.yourname.weathersync", "Real-Time Weather Sync", "1.3.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;

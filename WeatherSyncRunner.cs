@@ -130,10 +130,11 @@ namespace MyWeatherSyncMod
             bool isSnow = weatherEnv.HasValue && WeatherMapper.IsSnow(weatherEnv.Value);
 
             // 只在“白天”或“黄昏下雪”时强制多云背景。
-            // 这是刻意保留原设计：夜晚不会被换成 Cloudy 白天景，雨雪叠加在夜景之上。
+            // 这是刻意保留原设计：夜晚不被换成 Cloudy 白天景，雨雪叠加在夜景之上。
+            bool isDuskCloudy = timeOfDay == TimeOfDay.Dusk && isSnow;
             bool forceCloudy = weatherEnv.HasValue
                             && ConfigManager.EnableTimeSync.Value
-                            && (isDayPeriod || (timeOfDay == TimeOfDay.Dusk && isSnow));
+                            && (isDayPeriod || isDuskCloudy);
 
             Plugin.Log.LogInfo($"[Sync] Code:{data.WeatherCode} ({WeatherMapper.Describe(data.WeatherCode)}) " +
                                $"Temp:{data.Temperature:F1}°C → 降水:{weatherEnv?.ToString() ?? "none"}");
@@ -141,6 +142,15 @@ namespace MyWeatherSyncMod
             Plugin.Log.LogInfo($"[Sync] TimeOfDay:{timeOfDay}, forceCloudy:{forceCloudy} " +
                                $"(isDay:{isDayPeriod}, Rain:{isRain}, Snow:{isSnow}, " +
                                $"EnableWeatherSync:{ConfigManager.EnableWeatherSync.Value})");
+
+            // 降水但没切多云时，说清是“时段原因”还是“功能关闭”
+            if (weatherEnv.HasValue && !forceCloudy)
+            {
+                if (!ConfigManager.EnableTimeSync.Value)
+                    Plugin.Log.LogInfo($"[Sync] 降水保持 {timeOfDay} 窗景：EnableTimeSync=false，不做背景转换。");
+                else if (!isDayPeriod && !isDuskCloudy)
+                    Plugin.Log.LogInfo($"[Sync] 降水保持 {timeOfDay} 窗景：仅白天（或黄昏下雪）才转为多云，夜晚/傍晚维持原窗景。");
+            }
 
             try
             {
