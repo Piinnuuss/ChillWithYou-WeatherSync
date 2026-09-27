@@ -72,16 +72,16 @@ namespace MyWeatherSyncMod
 
             if (alreadyCorrect)
             {
+                // 降水状态没变化也要刷新背景：
+                //   · 有降水时保证音量/静音状态正确，并维持 Cloudy 背景；
+                //   · 【关键】没有降水时，时间窗景会随真实时间在 白天/傍晚/夜晚 之间迁移，
+                //     如果这里直接 return，雨停之后窗景就永远停在当次刷新时的那个时段
+                //     （实测：19 点多了还停在"傍晚"）。
                 if (targetPrecipitation.HasValue)
-                {
-                    RefreshSounds(targetPrecipitation.Value); // 保证音量/静音状态正确
-                    RefreshBackground(windowService, forceCloudy);
-                }
-                else if (forceCloudy)
-                {
-                    // 没有雨但要强制多云（正常不会走到，防御性分支）
-                    RefreshBackground(windowService, true);
-                }
+                    RefreshSounds(targetPrecipitation.Value);
+
+                RefreshBackground(windowService, forceCloudy);
+
                 _lastTarget = targetPrecipitation;
                 return;
             }
@@ -291,8 +291,14 @@ namespace MyWeatherSyncMod
                 }
                 else
                 {
+                    var current = GetActiveTimeWindow(windowService);
                     windowService.ChangeWeatherAndTime(target);
-                    LogBackgroundOnce("时间-" + target, $"[Apply] 背景按真实时间切换为 {target}。");
+                    LogBackgroundOnce("时间-" + target,
+                        $"[Apply] 背景跟随真实时间：{current} → {target}" +
+                        $"（当前 {DateTime.Now:HH:mm}，时段边界 白天/傍晚/夜晚 = " +
+                        $"{FormatHour(GetTimeNode(t => t.TimeDayStart))}/" +
+                        $"{FormatHour(GetTimeNode(t => t.TimeSunsetStart))}/" +
+                        $"{FormatHour(GetTimeNode(t => t.TimeNightStart))}）。");
                 }
             }
             catch (Exception ex)
@@ -307,12 +313,34 @@ namespace MyWeatherSyncMod
         /// </summary>
         private static bool IsTimeWindowActive(WindowViewService windowService)
         {
+            return GetActiveTimeWindow(windowService) != null;
+        }
+
+        /// <summary>返回当前激活的时间类窗景；若当前是自定义窗景则返回 null。</summary>
+        private static WindowViewType? GetActiveTimeWindow(WindowViewService windowService)
+        {
             foreach (var t in TimeWindowTypes)
             {
-                try { if (windowService.IsActiveWindow(t)) return true; }
+                try { if (windowService.IsActiveWindow(t)) return t; }
                 catch { }
             }
-            return false;
+            return null;
+        }
+
+        /// <summary>读存档里的某个时段节点，只用于日志展示。</summary>
+        private static float GetTimeNode(Func<AutoTimeWindowChangeData, float> pick)
+        {
+            try { return pick(SaveDataManager.Instance.AutoTimeWindowChangeData); }
+            catch { return 0f; }
+        }
+
+        /// <summary>把小时浮点数格式化成 HH:mm，只用于日志展示。</summary>
+        private static string FormatHour(float hours)
+        {
+            int h = (int)Math.Floor(hours);
+            int m = (int)Math.Round((hours - h) * 60f);
+            if (m >= 60) { h++; m = 0; }
+            return $"{h:00}:{m:00}";
         }
 
         private static readonly WindowViewType[] TimeWindowTypes =

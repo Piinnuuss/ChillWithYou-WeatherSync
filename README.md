@@ -122,11 +122,26 @@
 **① 时间窗景跟随真实时间**
 
 插件按存档里的时间节点（`TimeDayStart` / `TimeSunsetStart` / `TimeNightStart`）
-加上真实时钟，算出当前该用哪个时间窗景（Day / Sunset / Night），每轮同步刷新。
+加上真实时钟，算出当前该用哪个时间窗景（Day / Sunset / Night），**每轮同步都重新评估**。
+
+判定规则（来自游戏 `AutoTimeWindowSettings.GetWindowViewTypeFromTime`）：
+
+| 条件 | 窗景 |
+|------|------|
+| `TimeDayStart` ≤ 时间 < `TimeSunsetStart` | `Day` |
+| `TimeSunsetStart` ≤ 时间 < `TimeNightStart` | `Sunset` |
+| 其余 | `Night` |
+
+> 时段边界会按 `pinStep`（10 分钟）四舍五入。例如存档里
+> `5.8333 / 17.8333 / 18.3333` → 四舍五入为 `05:50 / 17:50 / 18:20`，
+> 即白天 05:50 起、傍晚 17:50 起、夜晚 18:20 起。
 
 > 插件**不读写游戏自己的「自动时间窗景」开关**（`IsActiveAuto`）—— 那是你的设置。
 > 因为游戏自带的 `ApplyTimeOfDayFromCurrentTime()` 在该开关关闭时会直接 return，
 > 插件改为自己计算，所以无论那个开关开着还是关着，时间窗景都会跟随真实时间。
+
+> ⚠️ 仅在**当前是时间类窗景**时才刷新（见 ③）。如果你切到了樱花/烟花，
+> 时间同步会暂停，切回时间窗景后自动恢复。
 
 **② 白天降水 → 多云背景**
 
@@ -154,7 +169,7 @@
 ### 正常启动的样子
 
 ```
-[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.3.1]
+[Info :Real-Time Weather Sync] Loading [Real-Time Weather Sync 1.3.2]
 [Info :Real-Time Weather Sync] === AWAKE START ===
 [Info :Real-Time Weather Sync] [SyncLoop] 循环已启动，10s 后开始检测……
 [Info :Real-Time Weather Sync] Auto-located: 31.3093, 120.6020
@@ -174,7 +189,7 @@
 
 | 日志 | 含义 |
 |------|------|
-| `背景按真实时间切换为 Day/Sunset/Night。` | 时间窗景跟随真实时间 |
+| `背景跟随真实时间：Sunset → Night（当前 19:10，时段边界 ...）` | 时间窗景随时段迁移 |
 | `白天有降水，背景已切换为 Cloudy。` | 白天降水 → 多云 |
 | `当前是玩家自定义窗景（烟花/樱花等），不覆盖，只处理雨雪。` | 保护你的自定义窗景 |
 | `时间窗景 xxx 尚未解锁，保持当前窗景。` | 该窗景未解锁，不强开 |

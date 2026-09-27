@@ -1,5 +1,48 @@
 # 更新日志
 
+## v1.3.2
+
+### 修复
+
+- **修复晴天时时间窗景不再跟随真实时间的问题**（实测：19 点多了窗景还停在"傍晚"）。
+
+  根因在 `EnvironmentApplier.Sync()` 的一个提前返回：
+
+  ```csharp
+  if (alreadyCorrect)
+  {
+      if (targetPrecipitation.HasValue) { ... RefreshBackground(...); }
+      else if (forceCloudy)             { ... }      // 无降水时两个分支都不成立
+      _lastTarget = targetPrecipitation;
+      return;                                        // ← 无降水且状态未变时直接返回
+  }
+  ```
+
+  降水状态没变化时（例如一直是晴天），`alreadyCorrect` 为 true 且
+  `targetPrecipitation` 为 null，两个分支都不成立，于是在 `return` 处直接退出，
+  **`RefreshBackground()` 从来没被调用**。
+
+  而时间窗景正是由 `RefreshBackground()` 驱动的 —— 它必须每轮都重新评估，
+  因为真实时间会让时段在 白天 → 傍晚 → 夜晚 之间迁移。
+  结果就是：雨停时那次同步把窗景刷成当时的时段（如 Day），之后就永远卡在那里。
+
+  实测时间节点（玩家存档 `TimeDayStart=5.8333 / TimeSunsetStart=17.8333 /
+  TimeNightStart=18.3333`，pinStep=10min 四舍五入后）：
+  白天 05:50 起 / 傍晚 17:50 起 / 夜晚 18:20 起。
+  所以 19:00 之后 `GetWindowViewTypeFromTime()` 本应返回 `Night`，
+  判定函数没问题 —— 是它压根没被调用。
+
+  ⇒ 现在无降水时也每轮刷新背景（时段未变时 `LogBackgroundOnce` 会去重，不会刷屏）。
+
+### 变更
+
+- 背景切换日志补充上下文，便于对照排查：
+
+  ```
+  [Apply] 背景跟随真实时间：Sunset → Night（当前 19:10，
+          时段边界 白天/傍晚/夜晚 = 05:50/17:50/18:20）。
+  ```
+
 ## v1.3.1
 
 ### 变更
