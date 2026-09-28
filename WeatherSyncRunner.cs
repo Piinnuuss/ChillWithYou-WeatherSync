@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using Bulbul;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -49,6 +50,9 @@ namespace MyWeatherSyncMod
 
             yield return new WaitForSecondsRealtime(StartupDelaySeconds);
 
+            // ---- 每次启动都重新解析位置 ----
+            yield return ResolveLocation();
+
             while (true)
             {
                 bool ready = false;
@@ -77,6 +81,189 @@ namespace MyWeatherSyncMod
                 if (waitSeconds < MinRefreshSeconds) waitSeconds = MinRefreshSeconds;
 
                 yield return new WaitForSecondsRealtime(waitSeconds);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 位置解析：城市名优先，IP 多源兜底
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// 每次启动都会跑一遍（不是只跑一次）。
+        /// 优先级：配置的 City（地理编码，精确）> 多源 IP 定位 > 沿用配置里的坐标。
+        /// </summary>
+        private IEnumerator ResolveLocation()
+        {
+            string city = null;
+            try { city = ConfigManager.City != null ? ConfigManager.City.Value : null; }
+            catch { }
+            if (city != null) city = city.Trim();
+
+            // ---- 1. 城市名优先（最准） ----
+            if (!string.IsNullOrEmpty(city))
+            {
+                var byCity = new LocationResult();
+                yield return FetchCity(city, byCity);
+                if (byCity.Success)
+                {
+                    ConfigManager.Latitude.Value = Math.Round(byCity.Latitude, 4);
+                    ConfigManager.Longitude.Value = Math.Round(byCity.Longitude, 4);
+                    ConfigManager.Save();
+                    LogCityResolved(city, byCity);
+                    yield break;
+                }
+                Plugin.Log.LogWarning($"[Location] 城市名 \"{city}\" 解析失败，退回 IP 定位。");
+            }
+
+            // ---- 2. IP 定位兜底 ----
+            bool autoLocate = true;
+            try { autoLocate = ConfigManager.AutoLocate == null || ConfigManager.AutoLocate.Value; }
+            catch { }
+
+            if (!autoLocate)
+            {
+                Plugin.Log.LogInfo("[Location] AutoLocate=false 且未配置 City，沿用配置中的坐标。");
+                yield break;
+            }
+
+            var byIp = new LocationResult();
+            yield return FetchIp(byIp);
+
+            if (byIp.Success)
+            {
+                ApplyLocation(byIp, byIp.Source);
+                Plugin.Log.LogInfo(
+                    "[Location] 提示：IP 定位在移动/共享宽带下可能落到邻近城市。" +
+                    "想要精确可在地图复制坐标填 Latitude/Longitude，" +
+                    "或在配置的 City 里填城市名。");
+            }
+            else
+            {
+                Plugin.Log.LogWarning("[Location] 所有 IP 服务都失败，沿用配置中的坐标。");
+            }
+        }
+
+        private void ApplyLocation(LocationResult loc, string source)
+        {
+            ConfigManager.Latitude.Value = Math.Round(loc.Latitude, 4);
+            ConfigManager.Longitude.Value = Math.Round(loc.Longitude, 4);
+            ConfigManager.Save();
+
+            var place = string.IsNullOrEmpty(loc.PlaceName) ? "" : $" [{loc.PlaceName}]";
+            Plugin.Log.LogInfo(
+                $"[Location] 已定位{place}：{ConfigManager.Latitude.Value:F4}, " +
+                $"{ConfigManager.Longitude.Value:F4}（来源：{source}）");
+        }
+
+        /// <summary>
+        /// 城市名解析成功后的日志。
+        /// 地名用英文名（与你填写的名字一致）+ 中文省/市层级，
+        /// 例如填 Jiangyin 会显示 [Jiangyin（中国 江苏 无锡市）] ——
+        /// 因为 Open-Meteo 的中文地名是「澄江」（江阴市区街道名），直接显示会让人困惑。
+        /// </summary>
+        private void LogCityResolved(string typed, LocationResult loc)
+        {
+            var display = loc.BuildDisplay();
+            if (string.IsNullOrEmpty(display)) display = loc.PlaceName;
+
+            Plugin.Log.LogInfo(
+                $"[Location] 已定位 [{display}]：{ConfigManager.Latitude.Value:F4}, " +
+                $"{ConfigManager.Longitude.Value:F4}（来源：城市名 \"{typed}\"）");
+        }
+
+        /// <summary>
+        /// 用 Open-Meteo 地理编码按城市名取精确坐标。
+        /// 发两个请求：默认（英文名，保证地名与你填的一致）+ language=zh（拿中文省/市层级）。
+        /// 中文版失败不影响主流程。
+        /// </summary>
+        private IEnumerator FetchCity(string city, LocationResult result)
+        {
+            // ---- 主请求：默认语言，英文地名 ----
+            string bodyEn = null;
+            using (var req = UnityWebRequest.Get(LocationFetcher.BuildCityUrlEnglish(city)))
+            {
+                req.timeout = NetworkTimeoutSeconds;
+                yield return req.SendWebRequest();
+                if (req.result == UnityWebRequest.Result.Success && req.downloadHandler != null)
+                    bodyEn = req.downloadHandler.text;
+                else
+                    Plugin.Log.LogWarning($"[Location] 城市名查询失败：{req.responseCode} {req.error}");
+            }
+            if (bodyEn == null) yield break;
+
+            string nameEn; double lat, lon;
+            if (!LocationFetcher.TryParseCityName(bodyEn, out nameEn, out lat, out lon))
+                yield break; // 无结果 -> 交给调用方回退到 IP
+
+            result.Latitude = lat;
+            result.Longitude = lon;
+            result.PlaceName = nameEn;
+            result.Success = true;
+            result.Source = "城市名 geocoding";
+
+            // ---- 附加请求：中文层级，仅用于日志展示 ----
+            using (var req2 = UnityWebRequest.Get(LocationFetcher.BuildCityUrl(city)))
+            {
+                req2.timeout = NetworkTimeoutSeconds;
+                yield return req2.SendWebRequest();
+                if (req2.result == UnityWebRequest.Result.Success && req2.downloadHandler != null)
+                {
+                    string a1, a2;
+                    if (LocationFetcher.TryParseCityChineseAdmins(req2.downloadHandler.text, out a1, out a2))
+                    {
+                        result.Admin1 = a1;
+                        result.Admin2 = a2;
+                    }
+                }
+            }
+        }
+
+        /// <summary>依次尝试多个 IP 服务，返回第一个成功的结果（数值重复的会被忽略）。</summary>
+        private IEnumerator FetchIp(LocationResult result)
+        {
+            var candidates = new List<KeyValuePair<string, LocationResult>>();
+
+            foreach (var ep in LocationFetcher.IpEndpoints)
+            {
+                string body = null;
+                using (var req = UnityWebRequest.Get(ep.Url))
+                {
+                    req.timeout = NetworkTimeoutSeconds;
+                    yield return req.SendWebRequest();
+                    if (req.result == UnityWebRequest.Result.Success && req.downloadHandler != null)
+                        body = req.downloadHandler.text;
+                }
+
+                if (body == null)
+                {
+                    Plugin.Log.LogInfo($"[Location] IP 服务 {ep.Name} 不可用，尝试下一个。");
+                    continue;
+                }
+
+                LocationResult parsed;
+                if (ep.TryParse(body, out parsed))
+                {
+                    Plugin.Log.LogInfo(
+                        $"[Location] IP 服务 {ep.Name} -> {parsed.Latitude:F4}, " +
+                        $"{parsed.Longitude:F4}{(string.IsNullOrEmpty(parsed.PlaceName) ? "" : " " + parsed.PlaceName)}");
+                    candidates.Add(new KeyValuePair<string, LocationResult>(ep.Name, parsed));
+                }
+                else
+                {
+                    Plugin.Log.LogInfo($"[Location] IP 服务 {ep.Name} 返回无效数据，尝试下一个。");
+                }
+            }
+
+            LocationResult best;
+            string note;
+            if (LocationFetcher.SelectBestIpResult(candidates, out best, out note))
+            {
+                if (!string.IsNullOrEmpty(note)) Plugin.Log.LogInfo($"[Location] {note}");
+                result.Latitude = best.Latitude;
+                result.Longitude = best.Longitude;
+                result.PlaceName = best.PlaceName;
+                result.Source = best.Source;
+                result.Success = true;
             }
         }
 

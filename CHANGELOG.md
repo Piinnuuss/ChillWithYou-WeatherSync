@@ -1,5 +1,104 @@
 # 更新日志
 
+## v1.4.0
+
+### 新增
+
+- **`[Location] City` 配置项：按城市名精确定位**（推荐使用）。
+
+  起因：玩家反馈插件定位到南京，而本人在江阴。实测该 IP（中国移动宽带，
+  `183.211.133.86`）在各服务上的结果：
+
+  | 来源 | 结果 | 偏差 |
+  |------|------|------|
+  | `ip-api.com`（原实现） | 南京 | 143.8 km |
+  | `ipinfo.io` | 上海 | ~130 km |
+  | `ipwho.is` | 无锡 | 39.0 km |
+  | `ipapi.is` | 无锡 | 38.9 km |
+  | **城市名 geocoding** | **31.9110, 120.2630** | **1.9 km** |
+
+  三家 IP 服务给出三个城市 —— 运营商共享出口 IP 的定位天生只能到"附近城市"，
+  换服务无法根治。因此改为**城市名优先**：
+
+  ```
+  City 非空 ──成功──> Open-Meteo 地理编码坐标
+     └─失败/为空──> AutoLocate ──> 依次尝试 3 个 IP 服务
+                        └─全失败──> 沿用配置坐标
+  ```
+
+  > ⚠️ 中文城市名有歧义：`江阴` 会解析到**福建省**的同名地。建议用拼音（`Jiangyin`）。
+
+- **IP 定位改为多源依次尝试**：`ipapi.is` → `ipwho.is` → `ip-api.com`，
+  取第一个成功的结果；数值完全相同的（同一上游数据源）会被去重并在日志标出。
+  失败响应会被正确拒绝（`status:fail`、`lat/lon = 0,0`、超范围值）。
+
+- 位置解析改为在 `WeatherSyncRunner` 的协程里执行（`UnityWebRequest`，非阻塞），
+  并**每次启动都重新解析**，日志会标明来源与实际解析出的地名：
+
+  ```
+  [Location] 已定位 [中国 江苏 澄江]：31.9110, 120.2630（来源：城市名 "Jiangyin"）
+  ```
+
+### 变更
+
+- `Plugin.AutoLocateThenNotify()` 移除（逻辑并入 `WeatherSyncRunner.ResolveLocation()`），
+  `Plugin.cs` 只负责初始化配置并启动 runner。
+
+## v1.3.3
+
+### 修复
+
+- **修复「多云只出现一瞬就被切回自动天气」**。
+
+  玩家报告：天气切为小雨正常，多云背景闪一下就变回当前时段。
+
+  **根因（反编译实证）**：游戏的自动时间窗景系统会**每 0.2 秒**强制覆盖窗景。
+
+  ```
+  DateService.Setup()
+    IL_0001: ldc.r8 0.2
+    IL_000a: TimeSpan::FromSeconds(0.2)
+    IL_0018: Observable::Interval(...)          // 每 0.2 秒
+    IL_0036: _onChangeTime::OnNext(...)
+
+  AutoTimeWindowViewChanger.Setup()
+    IL_0062: DateService::get_OnChangeTime()    // 订阅上面那个事件
+    -> b__1(DateTime)
+
+  AutoTimeWindowViewChanger.<Setup>b__1
+    IL_0006: saveData.get_IsActiveAuto()
+    IL_0010: brtrue.s IL_0013                   // 开关 = false 就直接 return
+    IL_0012: ret
+    ...
+    IL_007a: WindowViewService::ChangeWeatherAndTime(当前时段)
+  ```
+
+  即：**只要「自动时间窗景」开关为 `true`，游戏每 0.2 秒就会把窗景拉回
+  Day/Sunset/Night**，插件设置的 Cloudy 在 0.2 秒内被覆盖。
+
+  （雨雪窗景不受影响，因为 `ChangeWeatherAndTime` 只管时间类 GameObject ——
+  这正是"雨还在下、但多云没了"的原因。）
+
+  v1.3.1 曾为了"不篡改玩家设置"而放弃控制该开关，方向错了：
+  **不接管这个开关，就不可能维持多云背景。**
+
+  **修复**：降水期间由插件临时接管窗景，结束后**原样还原**玩家设置：
+
+  - 降水开始：记录玩家原本的开关值（`AutoTimeWasOnBeforeRain`，持久化）→ 关闭开关
+  - 降水持续：每轮确认开关处于关闭（`EnsureAutoTimeOff`，幂等）
+  - 降水结束：还原成玩家原本的值；若原本为"开"，游戏会立刻自行拉回正确时段
+
+  持久化这两个内部状态是为了避免游戏在降雨期间被强制结束/崩溃后无法还原。
+
+  另：`_lastTarget` 的赋值移到 `RefreshBackground()` 之前 —— 后者需要用它判断
+  "本次是否有降水"来决定接管还是交还。
+
+### 兼容性
+
+- 玩家原本**关着**自动时间窗景 → 全程保持关闭，插件继续按真实时钟驱动窗景
+- 玩家原本**开着** → 降水期间临时关闭、结束后恢复为开启
+- 当前是**自定义窗景**（樱花/烟花等）→ 完全不接管、不碰背景，只下雨
+
 ## v1.3.2
 
 ### 修复

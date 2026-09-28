@@ -12,9 +12,18 @@ namespace MyWeatherSyncMod
         public static ConfigEntry<double> Longitude;
         public static ConfigEntry<int> RefreshMinutes;
         public static ConfigEntry<bool> AutoLocate;
+        public static ConfigEntry<string> City;
         public static ConfigEntry<bool> PreferFullWeather;
         public static ConfigEntry<int> WeatherLookAheadHours;
         public static ConfigEntry<double> WeatherGridRadius;
+
+        /// <summary>
+        /// 内部状态：下雨期间插件临时接管了窗景，需要知道"原来该不该开自动时间"。
+        /// 持久化是为了避免游戏在降雨期间被强制结束/崩溃后，无法还原玩家设置。
+        /// 不是给用户改的选项。
+        /// </summary>
+        public static ConfigEntry<bool> WeatherTookOverWindow;
+        public static ConfigEntry<bool> AutoTimeWasOnBeforeRain;
 
         public static void Init(ConfigFile cfg)
         {
@@ -31,7 +40,13 @@ namespace MyWeatherSyncMod
             Longitude = cfg.Bind("Location", "Longitude", WeatherFetcher.DefaultLon,
                 "Your longitude (-180 to 180)");
             AutoLocate = cfg.Bind("Location", "AutoLocate", true,
-                "Automatically detect location using IP. Disable to use manual coordinates.");
+                "Automatically detect location using IP. Disable to use manual coordinates. " +
+                "NOTE: IP-based location is often wrong on carrier/mobile networks " +
+                "(it may resolve to a neighbouring city). Setting City below is more accurate.");
+            City = cfg.Bind("Location", "City", "",
+                "RECOMMENDED. Your city name, e.g. \"Jiangyin\" or \"江阴\". " +
+                "Resolved to exact coordinates via Open-Meteo geocoding and takes priority " +
+                "over AutoLocate. Leave empty to fall back to IP-based detection.");
             RefreshMinutes = cfg.Bind("Update", "RefreshMinutes", 30,
                 "Weather refresh interval in minutes (minimum 5)");
             WeatherLookAheadHours = cfg.Bind("Update", "WeatherLookAheadHours", 3,
@@ -47,6 +62,14 @@ namespace MyWeatherSyncMod
                     "rain is treated as active if ANY point in the grid reports it. " +
                     "0 = query the single coordinate only.",
                     new AcceptableValueRange<double>(0.0, 1.0)));
+
+            // 内部状态，不是用户选项
+            WeatherTookOverWindow = cfg.Bind("Internal", "WeatherTookOverWindow", false,
+                "INTERNAL STATE - do not edit. True while the plugin has taken over the window " +
+                "view because of rain/snow, and must hand it back when precipitation ends.");
+            AutoTimeWasOnBeforeRain = cfg.Bind("Internal", "AutoTimeWasOnBeforeRain", true,
+                "INTERNAL STATE - do not edit. Remembered value of the game's 'auto time window' " +
+                "switch, so it can be restored exactly as the player had it.");
         }
 
         /// <summary>把当前配置写回磁盘（自动定位成功后调用）。</summary>

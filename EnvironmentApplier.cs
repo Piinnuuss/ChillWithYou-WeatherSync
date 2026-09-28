@@ -48,8 +48,65 @@ namespace MyWeatherSyncMod
         private static string _lastBackgroundAction = "";
 
         /// <summary>
-        /// 把游戏窗景同步到目标状态。
+        /// 【为什么必须临时关掉游戏的「自动时间窗景」】
+        ///
+        /// 实测反编译结果：DateService.Setup() 用 Observable.Interval(0.2s) 每 0.2 秒推送一次
+        /// OnChangeTime，而 AutoTimeWindowViewChanger.Setup() 订阅了它，并且在该开关为 true 时
+        /// 立刻调用 ApplyTimeOfDayFromCurrentTime() -> WindowViewService.ChangeWeatherAndTime(当前时段)。
+        ///
+        /// 也就是说：只要「自动时间窗景」开着，游戏每 0.2 秒就会把时间窗景强制拉回
+        /// Day/Sunset/Night。插件切换的 Cloudy 会在 0.2 秒内被覆盖 —— 表现为
+        /// “多云只出现了一瞬又切回自动天气”。
+        ///
+        /// （雨雪窗景不受影响，因为 ChangeWeatherAndTime 只管时间类 GameObject。）
+        ///
+        /// 所以降水期间必须由插件接管窗景：记录玩家原本的开关值 → 关掉 → 降水结束原样还原。
         /// </summary>
+        private static bool WeatherTookOverWindow
+        {
+            get
+            {
+                try { return ConfigManager.WeatherTookOverWindow != null && ConfigManager.WeatherTookOverWindow.Value; }
+                catch { return false; }
+            }
+            set
+            {
+                try
+                {
+                    if (ConfigManager.WeatherTookOverWindow != null &&
+                        ConfigManager.WeatherTookOverWindow.Value != value)
+                    {
+                        ConfigManager.WeatherTookOverWindow.Value = value;
+                        ConfigManager.Save();
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static bool AutoTimeWasOnBeforeRain
+        {
+            get
+            {
+                try { return ConfigManager.AutoTimeWasOnBeforeRain == null || ConfigManager.AutoTimeWasOnBeforeRain.Value; }
+                catch { return true; }
+            }
+            set
+            {
+                try
+                {
+                    if (ConfigManager.AutoTimeWasOnBeforeRain != null &&
+                        ConfigManager.AutoTimeWasOnBeforeRain.Value != value)
+                    {
+                        ConfigManager.AutoTimeWasOnBeforeRain.Value = value;
+                        ConfigManager.Save();
+                    }
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>把游戏窗景同步到目标状态。</summary>
         /// <param name="targetPrecipitation">
         /// 目标降水类型；null 表示“当地没有降水”，必须关闭当前所有雨雪窗景。
         /// </param>
@@ -62,6 +119,11 @@ namespace MyWeatherSyncMod
                 Plugin.Log.LogWarning("[Apply] WindowViewService 不可用，跳过本次窗景同步。");
                 return;
             }
+
+            // _lastTarget 必须在调用 RefreshBackground 之前更新：
+            // RefreshBackground 用 _lastTarget.HasValue 判断"本次是否有降水"，
+            // 从而决定要不要接管/交还窗景。
+            _lastTarget = targetPrecipitation;
 
             // ---- 关键：以场景真实状态为准，而不是插件自己的记忆 ----
             EnvironmentType? actualPrecipitation = QueryActivePrecipitation(windowService);
@@ -81,8 +143,6 @@ namespace MyWeatherSyncMod
                     RefreshSounds(targetPrecipitation.Value);
 
                 RefreshBackground(windowService, forceCloudy);
-
-                _lastTarget = targetPrecipitation;
                 return;
             }
 
@@ -98,8 +158,6 @@ namespace MyWeatherSyncMod
                 DisableAllPrecipitation(windowService);
                 RefreshBackground(windowService, false); // 交回时间窗景（会自行判断是否该动）
             }
-
-            _lastTarget = targetPrecipitation;
         }
 
         // ------------------------------------------------------------------
@@ -256,23 +314,36 @@ namespace MyWeatherSyncMod
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// 刷新窗景背景。两条路径：
-        ///   · forceCloudy=true（白天有降水）→ 换成 Cloudy 时间窗景
-        ///   · forceCloudy=false（晴天 / 夜晚降水 / 降水结束）→ 交回按真实时间驱动的时间窗景
+        /// 刷新窗景背景。三条路径：
+        ///   · forceCloudy=true（白天有降水）→ 换成 Cloudy 时间窗景，并【接管】窗景
+        ///   · forceCloudy=false + 降水中（夜晚/傍晚）→ 按真实时间显示，但仍【接管】窗景
+        ///   · forceCloudy=false 且无降水 → 交还给游戏的时间窗景 / 玩家设置
         ///
-        /// 两条路径都遵守同一条铁律：
-        /// 【当前窗景是玩家自定义的（烟花/樱花/深海…）时，绝不覆盖，直接不动。】
+        /// 铁律：当前窗景是玩家自定义的（烟花/樱花/深海…）时绝不覆盖，直接不动。
         /// </summary>
         private static void RefreshBackground(WindowViewService windowService, bool forceCloudy)
         {
+            bool precipitating = _lastTarget.HasValue;
+
             try
             {
-                // 玩家自己选的窗景（非时间类）→ 无论如何都不碰
+                // 玩家自己选的窗景（非时间类）→ 无论如何都不碰，也不需要接管
                 if (!IsTimeWindowActive(windowService))
                 {
                     LogBackgroundOnce("保留自定义窗景",
                         "[Apply] 当前是玩家自定义窗景（烟花/樱花等），不覆盖，只处理雨雪。");
                     return;
+                }
+
+                if (precipitating)
+                {
+                    // ---- 降水期间：必须接管，否则游戏每 0.2 秒覆盖一次 ----
+                    TakeOverWindow();
+                }
+                else
+                {
+                    // ---- 无降水：先交还，再按时间/设置刷新 ----
+                    if (!ReleaseWindow()) return; // 交还后仍由游戏托管则不必再动
                 }
 
                 // 时间窗景是要解锁的（夜晚需先解锁），没解锁就不要强开
@@ -287,14 +358,23 @@ namespace MyWeatherSyncMod
                 if (forceCloudy)
                 {
                     windowService.ChangeWeatherAndTime(WindowViewType.Cloudy);
-                    LogBackgroundOnce("多云", "[Apply] 白天有降水，背景已切换为 Cloudy。");
+                    LogBackgroundOnce("多云",
+                        $"[Apply] 白天有降水，背景已切换为 Cloudy（已暂停游戏的自动时间切换以免被覆盖）。");
+                }
+                else if (precipitating)
+                {
+                    // 夜晚/傍晚降水：不转多云，但窗景已"冻结"，需要插件自己随时段推进
+                    var cur = GetActiveTimeWindow(windowService);
+                    windowService.ChangeWeatherAndTime(target);
+                    LogBackgroundOnce("降水时段-" + target,
+                        $"[Apply] 降水保持 {target} 窗景（{cur} → {target}，非白天不转多云）。");
                 }
                 else
                 {
-                    var current = GetActiveTimeWindow(windowService);
+                    var cur = GetActiveTimeWindow(windowService);
                     windowService.ChangeWeatherAndTime(target);
                     LogBackgroundOnce("时间-" + target,
-                        $"[Apply] 背景跟随真实时间：{current} → {target}" +
+                        $"[Apply] 背景跟随真实时间：{cur} → {target}" +
                         $"（当前 {DateTime.Now:HH:mm}，时段边界 白天/傍晚/夜晚 = " +
                         $"{FormatHour(GetTimeNode(t => t.TimeDayStart))}/" +
                         $"{FormatHour(GetTimeNode(t => t.TimeSunsetStart))}/" +
@@ -304,6 +384,77 @@ namespace MyWeatherSyncMod
             catch (Exception ex)
             {
                 Plugin.Log.LogError($"[Apply] 切换背景失败: {ex.Message}");
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 窗景接管 / 交还
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// 降水开始或持续时调用：记录玩家原本的「自动时间窗景」设置并临时关闭它。
+        /// 不关掉的话，游戏每 0.2 秒会把 Cloudy 覆盖回当前时段。
+        /// </summary>
+        private static void TakeOverWindow()
+        {
+            if (WeatherTookOverWindow)
+            {
+                EnsureAutoTimeOff();
+                return;
+            }
+
+            AutoTimeWasOnBeforeRain = IsAutoTimeOn();
+            WeatherTookOverWindow = true;
+            EnsureAutoTimeOff();
+            Plugin.Log.LogInfo(
+                $"[Apply] 降水期间接管窗景（玩家原本的自动时间窗景 = " +
+                $"{(AutoTimeWasOnBeforeRain ? "开" : "关")}，暂关以免背景被游戏覆盖，降水结束会原样还原）。");
+        }
+
+        /// <summary>
+        /// 降水结束时调用：把「自动时间窗景」还原成玩家原本的设置。
+        /// </summary>
+        /// <returns>true 表示窗景已交还给游戏托管，调用方不必再手动设置窗景。</returns>
+        private static bool ReleaseWindow()
+        {
+            if (!WeatherTookOverWindow)
+                return false; // 本来就没接管，交给调用方按时间刷新
+
+            bool restoreTo = AutoTimeWasOnBeforeRain;
+            WeatherTookOverWindow = false;
+
+            SetAutoTime(restoreTo);
+            Plugin.Log.LogInfo($"[Apply] 降水结束，已把「自动时间窗景」还原为 {(restoreTo ? "开" : "关")}。");
+
+            // 还原成"开"时，游戏的 ApplyTimeOfDayFromCurrentTime() 会自行把窗景拉回当前时段
+            return restoreTo;
+        }
+
+        private static bool IsAutoTimeOn()
+        {
+            try { return SaveDataManager.Instance.AutoTimeWindowChangeData.IsActiveAuto.Value; }
+            catch { return false; }
+        }
+
+        /// <summary>只在降水期间使用，用于压制游戏的自动时间覆盖。</summary>
+        private static void EnsureAutoTimeOff()
+        {
+            if (!IsAutoTimeOn()) return;
+            SetAutoTime(false);
+        }
+
+        private static void SetAutoTime(bool enabled)
+        {
+            try
+            {
+                var sd = SaveDataManager.Instance;
+                if (sd.AutoTimeWindowChangeData.IsActiveAuto.Value == enabled) return;
+                sd.AutoTimeWindowChangeData.IsActiveAuto.Value = enabled;
+                sd.SaveAutoTimeWindowChangeData();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[Apply] 切换自动时间窗景失败: {ex.Message}");
             }
         }
 
