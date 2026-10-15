@@ -13,6 +13,8 @@ namespace MyWeatherSyncMod
         public float Temperature;
         public DateTime Sunrise;
         public DateTime Sunset;
+        public DateTime LocalNow;
+        public int UtcOffsetSeconds;
 
         /// <summary>判定所依据的采样点/小时摘要，用于日志追溯。</summary>
         public string SampledHours = "";
@@ -70,9 +72,12 @@ namespace MyWeatherSyncMod
 
         public WeatherFetcher(double lat, double lon, int lookAheadHours = 3, double gridRadius = 0.09)
         {
-            // 防止配置被写成 0,0（几内亚湾）或非法值
-            Latitude = (lat >= -90.0 && lat <= 90.0 && lat != 0.0) ? lat : DefaultLat;
-            Longitude = (lon >= -180.0 && lon <= 180.0 && lon != 0.0) ? lon : DefaultLon;
+            // 只有 (0,0) 整组或越界坐标才需要回退；单独的 0 是合法经纬度。
+            bool valid = lat >= -90.0 && lat <= 90.0 &&
+                         lon >= -180.0 && lon <= 180.0 &&
+                         !(lat == 0.0 && lon == 0.0);
+            Latitude = valid ? lat : DefaultLat;
+            Longitude = valid ? lon : DefaultLon;
             LookAheadHours = Math.Max(0, Math.Min(lookAheadHours, 24));
             GridRadius = Math.Max(0.0, Math.Min(gridRadius, 1.0));
         }
@@ -145,6 +150,11 @@ namespace MyWeatherSyncMod
             if (center == null)
                 throw new InvalidOperationException("Open-Meteo 返回的采样点无法解析。");
 
+            data.UtcOffsetSeconds = GetUtcOffset(center);
+            DateTime utcNow = DateTime.UtcNow;
+            data.LocalNow = DateTime.SpecifyKind(
+                utcNow.AddSeconds(data.UtcOffsetSeconds), DateTimeKind.Unspecified);
+
             var daily = center["daily"];
             if (daily == null)
                 throw new InvalidOperationException("Open-Meteo 响应缺少 'daily' 字段。");
@@ -159,12 +169,6 @@ namespace MyWeatherSyncMod
             if (cur != null && cur["temperature_2m"] != null)
                 data.Temperature = cur["temperature_2m"].Value<float>();
 
-            // timezone=auto 返回的时间字符串就是当地时间，直接与本地"当前小时"对齐
-            var now = DateTime.Now;
-            var currentHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0);
-            var from = currentHour.AddHours(-LookBackHours);
-            var to = currentHour.AddHours(LookAheadHours);
-
             int worstCode = -1;
             bool anyPrecip = false;
             double maxWindowPrecip = 0.0;
@@ -176,6 +180,13 @@ namespace MyWeatherSyncMod
             {
                 var hourly = pt["hourly"] as JObject;
                 if (hourly == null) continue;
+
+                // 每个采样点可能属于不同时区，以该点的 UTC 偏移匹配其 hourly 时间。
+                var now = DateTime.SpecifyKind(
+                    utcNow.AddSeconds(GetUtcOffset(pt)), DateTimeKind.Unspecified);
+                var currentHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0);
+                var from = currentHour.AddHours(-LookBackHours);
+                var to = currentHour.AddHours(LookAheadHours);
 
                 var times = hourly["time"] as JArray;
                 var codes = hourly["weather_code"] as JArray;
@@ -231,7 +242,7 @@ namespace MyWeatherSyncMod
 
             if (matched == 0)
                 throw new InvalidOperationException(
-                    $"hourly 数据中找不到当前小时 {currentHour:yyyy-MM-ddTHH:mm}（共 {points.Count} 个采样点）。");
+                    $"hourly 数据中找不到当地当前小时 {data.LocalNow:yyyy-MM-ddTHH}:00（共 {points.Count} 个采样点）。");
 
             data.SampledHours = string.Join(" | ", sampled.ToArray());
             data.WindowPrecipitation = maxWindowPrecip;
@@ -240,6 +251,14 @@ namespace MyWeatherSyncMod
             data.WeatherCode = Classify(worstCode, anyPrecip, maxWindowPrecip);
 
             return data;
+        }
+
+        private static int GetUtcOffset(JToken point)
+        {
+            var offset = point["utc_offset_seconds"];
+            if (offset == null || offset.Type == JTokenType.Null)
+                throw new InvalidOperationException("Open-Meteo 响应缺少 utc_offset_seconds。");
+            return offset.Value<int>();
         }
 
         /// <summary>找出离请求坐标最近的采样点（用于取温度，避免被网格角落的极值影响）。</summary>
@@ -259,7 +278,9 @@ namespace MyWeatherSyncMod
 
                 // 网格尺度很小，用平面近似足够
                 double dLat = la - Latitude;
-                double dLon = (lo - Longitude) * Math.Cos(Latitude * Math.PI / 180.0);
+                double longitudeDelta = Math.Abs(lo - Longitude);
+                longitudeDelta = Math.Min(longitudeDelta, 360.0 - longitudeDelta);
+                double dLon = longitudeDelta * Math.Cos(Latitude * Math.PI / 180.0);
                 double dist = dLat * dLat + dLon * dLon;
 
                 if (dist < bestDist) { bestDist = dist; best = pt; }

@@ -31,6 +31,9 @@ namespace MyWeatherSyncMod
         private const int MinRefreshSeconds = 60;
         private const int NetworkTimeoutSeconds = 15;
 
+        private WeatherData _lastWeatherData;
+        private bool _locationResolved;
+
         public static WeatherSyncRunner Create()
         {
             var go = new GameObject("WeatherSyncRunner");
@@ -50,11 +53,15 @@ namespace MyWeatherSyncMod
 
             yield return new WaitForSecondsRealtime(StartupDelaySeconds);
 
-            // ---- 每次启动都重新解析位置 ----
-            yield return ResolveLocation();
-
             while (true)
             {
+                if (!_locationResolved &&
+                    (ConfigManager.EnableWeatherSync.Value || ConfigManager.EnableTimeSync.Value))
+                {
+                    yield return ResolveLocation();
+                    _locationResolved = true;
+                }
+
                 bool ready = false;
 
                 try
@@ -78,9 +85,43 @@ namespace MyWeatherSyncMod
                 int waitSeconds = ready
                     ? Math.Max(ConfigManager.RefreshMinutes.Value, 5) * 60
                     : RetryDelaySeconds;
-                if (waitSeconds < MinRefreshSeconds) waitSeconds = MinRefreshSeconds;
+                if (ready && waitSeconds < MinRefreshSeconds) waitSeconds = MinRefreshSeconds;
 
-                yield return new WaitForSecondsRealtime(waitSeconds);
+                // 配置开关变化时最多等 5 秒就执行下一轮，不必等完整的天气刷新周期。
+                bool weatherEnabled = ConfigManager.EnableWeatherSync.Value;
+                bool timeEnabled = ConfigManager.EnableTimeSync.Value;
+                bool fullWeather = ConfigManager.PreferFullWeather.Value;
+                int refreshMinutes = ConfigManager.RefreshMinutes.Value;
+                int remaining = waitSeconds;
+                while (remaining > 0)
+                {
+                    int step = Math.Min(remaining, 5);
+                    yield return new WaitForSecondsRealtime(step);
+                    remaining -= step;
+                    if (weatherEnabled != ConfigManager.EnableWeatherSync.Value ||
+                        timeEnabled != ConfigManager.EnableTimeSync.Value ||
+                        fullWeather != ConfigManager.PreferFullWeather.Value ||
+                        refreshMinutes != ConfigManager.RefreshMinutes.Value)
+                        break;
+
+                    if (timeEnabled && _lastWeatherData != null && IsEnvironmentReady())
+                    {
+                        DateTime localNow = DateTime.SpecifyKind(
+                            DateTime.UtcNow.AddSeconds(_lastWeatherData.UtcOffsetSeconds),
+                            DateTimeKind.Unspecified);
+                        var period = TimeSyncManager.GetTimeOfDay(
+                            _lastWeatherData.Sunrise, _lastWeatherData.Sunset, localNow);
+                        bool isDay = period == TimeOfDay.Morning ||
+                                     period == TimeOfDay.Day || period == TimeOfDay.Afternoon;
+                        var lastPrecipitation = WeatherMapper.GetPrecipitation(_lastWeatherData.WeatherCode);
+                        bool isDuskSnow = period == TimeOfDay.Dusk &&
+                                          lastPrecipitation.HasValue &&
+                                          WeatherMapper.IsSnow(lastPrecipitation.Value);
+                        bool forceCloudy = weatherEnabled && lastPrecipitation.HasValue &&
+                                           (isDay || isDuskSnow);
+                        EnvironmentApplier.RefreshClock(localNow, forceCloudy);
+                    }
+                }
             }
         }
 
@@ -269,6 +310,35 @@ namespace MyWeatherSyncMod
 
         private IEnumerator RunOnce()
         {
+            bool weatherEnabled = ConfigManager.EnableWeatherSync.Value;
+            bool timeEnabled = ConfigManager.EnableTimeSync.Value;
+            try
+            {
+                if (!weatherEnabled)
+                {
+                    EnvironmentApplier.StopWeatherSync();
+                    if (timeEnabled && _lastWeatherData != null)
+                    {
+                        var localNow = DateTime.SpecifyKind(
+                            DateTime.UtcNow.AddSeconds(_lastWeatherData.UtcOffsetSeconds),
+                            DateTimeKind.Unspecified);
+                        EnvironmentApplier.SyncTimeOnly(localNow);
+                    }
+                }
+                else if (!timeEnabled)
+                    EnvironmentApplier.ReleaseWindowControl();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[Sync] 释放窗景控制失败: {ex}");
+            }
+
+            if (!weatherEnabled && !timeEnabled)
+            {
+                _lastWeatherData = null;
+                yield break;
+            }
+
             var fetcher = CreateFetcher();
             string url = fetcher.BuildUrl();
 
@@ -308,7 +378,7 @@ namespace MyWeatherSyncMod
 
             // ---- 判断（全部在 Unity 主线程上）----
             var weatherEnv = WeatherMapper.GetPrecipitation(data.WeatherCode);
-            var timeOfDay = TimeSyncManager.GetTimeOfDay(data.Sunrise, data.Sunset);
+            var timeOfDay = TimeSyncManager.GetTimeOfDay(data.Sunrise, data.Sunset, data.LocalNow);
             bool isDayPeriod = timeOfDay == TimeOfDay.Morning
                             || timeOfDay == TimeOfDay.Day
                             || timeOfDay == TimeOfDay.Afternoon;
@@ -320,7 +390,7 @@ namespace MyWeatherSyncMod
             // 这是刻意保留原设计：夜晚不被换成 Cloudy 白天景，雨雪叠加在夜景之上。
             bool isDuskCloudy = timeOfDay == TimeOfDay.Dusk && isSnow;
             bool forceCloudy = weatherEnv.HasValue
-                            && ConfigManager.EnableTimeSync.Value
+                            && timeEnabled
                             && (isDayPeriod || isDuskCloudy);
 
             Plugin.Log.LogInfo($"[Sync] Code:{data.WeatherCode} ({WeatherMapper.Describe(data.WeatherCode)}) " +
@@ -328,33 +398,34 @@ namespace MyWeatherSyncMod
             Plugin.Log.LogInfo($"[Sync] {WeatherFetcher.DescribeWindow(data)}");
             Plugin.Log.LogInfo($"[Sync] TimeOfDay:{timeOfDay}, forceCloudy:{forceCloudy} " +
                                $"(isDay:{isDayPeriod}, Rain:{isRain}, Snow:{isSnow}, " +
-                               $"EnableWeatherSync:{ConfigManager.EnableWeatherSync.Value})");
+                               $"EnableWeatherSync:{weatherEnabled})");
 
             // 降水但没切多云时，说清是“时段原因”还是“功能关闭”
             if (weatherEnv.HasValue && !forceCloudy)
             {
-                if (!ConfigManager.EnableTimeSync.Value)
+                if (!timeEnabled)
                     Plugin.Log.LogInfo($"[Sync] 降水保持 {timeOfDay} 窗景：EnableTimeSync=false，不做背景转换。");
                 else if (!isDayPeriod && !isDuskCloudy)
                     Plugin.Log.LogInfo($"[Sync] 降水保持 {timeOfDay} 窗景：仅白天（或黄昏下雪）才转为多云，夜晚/傍晚维持原窗景。");
             }
 
+            if (timeEnabled)
+            {
+                try { UpdateTimeNodes(data.Sunrise, data.Sunset); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[Sync] 更新时间节点失败: {ex.Message}"); }
+            }
+
             try
             {
-                if (ConfigManager.EnableWeatherSync.Value)
-                    EnvironmentApplier.Sync(weatherEnv, forceCloudy);
-                else if (weatherEnv == null)
-                    EnvironmentApplier.Sync(null, false); // 功能关闭时也保证不残留雨雪
+                if (weatherEnabled)
+                    EnvironmentApplier.Sync(weatherEnv, forceCloudy, data.LocalNow, timeEnabled);
+                else if (timeEnabled)
+                    EnvironmentApplier.SyncTimeOnly(data.LocalNow);
+                _lastWeatherData = data;
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogError($"[Sync] 应用窗景失败: {ex}");
-            }
-
-            if (ConfigManager.EnableTimeSync.Value)
-            {
-                try { UpdateTimeNodes(data.Sunrise, data.Sunset); }
-                catch (Exception ex) { Plugin.Log.LogWarning($"[Sync] 更新时间节点失败: {ex.Message}"); }
             }
 
             Plugin.Log.LogInfo("[Sync] Done.");
@@ -366,9 +437,6 @@ namespace MyWeatherSyncMod
             {
                 double lat = ConfigManager.Latitude.Value;
                 double lon = ConfigManager.Longitude.Value;
-                if (lat == 0.0 && lon == 0.0)
-                    lon = WeatherFetcher.DefaultLon; // 首次启动时 lat 为 0，给个合理经度避免落到 (0,0)
-
                 int lookAhead = ConfigManager.WeatherLookAheadHours != null
                     ? ConfigManager.WeatherLookAheadHours.Value
                     : 3;

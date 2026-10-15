@@ -18,12 +18,14 @@ namespace MyWeatherSyncMod
         public static ConfigEntry<double> WeatherGridRadius;
 
         /// <summary>
-        /// 内部状态：下雨期间插件临时接管了窗景，需要知道"原来该不该开自动时间"。
+        /// 内部状态：插件临时接管时间窗景时，需要记住原来的自动时间设置。
         /// 持久化是为了避免游戏在降雨期间被强制结束/崩溃后，无法还原玩家设置。
         /// 不是给用户改的选项。
         /// </summary>
         public static ConfigEntry<bool> WeatherTookOverWindow;
         public static ConfigEntry<bool> AutoTimeWasOnBeforeRain;
+        public static ConfigEntry<string> ManagedPrecipitation;
+        public static ConfigEntry<string> ManagedSound;
 
         public static void Init(ConfigFile cfg)
         {
@@ -34,7 +36,7 @@ namespace MyWeatherSyncMod
             EnableTimeSync = cfg.Bind("General", "EnableTimeSync", true,
                 "Enable day/night cycle based on local time");
             PreferFullWeather = cfg.Bind("General", "PreferFullWeather", true,
-                "If true, rain/snow window visuals will be activated (replaces custom window views). If false, only cloudy background + sound.");
+                "If true, rain/snow visuals are activated while custom backgrounds are preserved. If false, only cloudy background + sound.");
             Latitude = cfg.Bind("Location", "Latitude", WeatherFetcher.DefaultLat,
                 "Your latitude (-90 to 90)");
             Longitude = cfg.Bind("Location", "Longitude", WeatherFetcher.DefaultLon,
@@ -66,10 +68,14 @@ namespace MyWeatherSyncMod
             // 内部状态，不是用户选项
             WeatherTookOverWindow = cfg.Bind("Internal", "WeatherTookOverWindow", false,
                 "INTERNAL STATE - do not edit. True while the plugin has taken over the window " +
-                "view because of rain/snow, and must hand it back when precipitation ends.");
+                "view for rain/snow or a different timezone, and must hand it back afterward.");
             AutoTimeWasOnBeforeRain = cfg.Bind("Internal", "AutoTimeWasOnBeforeRain", true,
                 "INTERNAL STATE - do not edit. Remembered value of the game's 'auto time window' " +
                 "switch, so it can be restored exactly as the player had it.");
+            ManagedPrecipitation = cfg.Bind("Internal", "ManagedPrecipitation", "",
+                "INTERNAL STATE - rain/snow visual last activated by this plugin.");
+            ManagedSound = cfg.Bind("Internal", "ManagedSound", "",
+                "INTERNAL STATE - rain sound last activated by this plugin.");
         }
 
         /// <summary>把当前配置写回磁盘（自动定位成功后调用）。</summary>

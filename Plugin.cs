@@ -3,7 +3,7 @@ using BepInEx.Logging;
 
 namespace MyWeatherSyncMod
 {
-    [BepInPlugin("com.yourname.weathersync", "Real-Time Weather Sync", "1.4.0")]
+    [BepInPlugin("com.yourname.weathersync", "Real-Time Weather Sync", "1.4.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;

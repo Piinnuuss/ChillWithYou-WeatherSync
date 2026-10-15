@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using BepInEx.Configuration;
 using Bulbul;
 using UnityEngine;
 using VContainer;
@@ -15,11 +17,8 @@ namespace MyWeatherSyncMod
     ///              但【只在当前窗景本来就是时间类时】才动，绝不覆盖玩家自己选的
     ///              烟花 / 樱花 / 深海等自定义窗景。
     ///
-    /// 【不碰的东西】游戏自己的「自动时间窗景」开关（AutoTimeWindowChangeData.IsActiveAuto）。
-    ///   那个开关属于玩家的设置，插件一改就等于篡改用户偏好。
-    ///   注意游戏自身的 AutoTimeWindowViewChanger.ApplyTimeOfDayFromCurrentTime()
-    ///   第一行就是 `if (!IsActiveAuto) return;` —— 开关关着时它什么都不做，
-    ///   所以插件必须自己算时间窗景，不能依赖它。
+    /// 游戏的自动时间窗景会覆盖 Cloudy 或异地时间，插件临时关闭该开关并保存原值；
+    /// 天气/时间同步关闭、回到本机时区或切换自定义窗景时立即还原。
     ///
     /// 关键设计（旧版的两个致命 bug 都在这里）：
     ///
@@ -60,7 +59,7 @@ namespace MyWeatherSyncMod
         ///
         /// （雨雪窗景不受影响，因为 ChangeWeatherAndTime 只管时间类 GameObject。）
         ///
-        /// 所以降水期间必须由插件接管窗景：记录玩家原本的开关值 → 关掉 → 降水结束原样还原。
+        /// 降水或异地时间同步期间接管窗景：记录玩家原本的开关值 → 关掉 → 结束后还原。
         /// </summary>
         private static bool WeatherTookOverWindow
         {
@@ -106,12 +105,28 @@ namespace MyWeatherSyncMod
             }
         }
 
+        private static EnvironmentType? ReadManaged(ConfigEntry<string> entry)
+        {
+            EnvironmentType type;
+            return entry != null && Enum.TryParse(entry.Value, out type) ? (EnvironmentType?)type : null;
+        }
+
+        private static void SaveManaged(ConfigEntry<string> entry, EnvironmentType? type)
+        {
+            if (entry == null) return;
+            string value = type.HasValue ? type.Value.ToString() : "";
+            if (entry.Value == value) return;
+            entry.Value = value;
+            ConfigManager.Save();
+        }
+
         /// <summary>把游戏窗景同步到目标状态。</summary>
         /// <param name="targetPrecipitation">
         /// 目标降水类型；null 表示“当地没有降水”，必须关闭当前所有雨雪窗景。
         /// </param>
         /// <param name="forceCloudy">是否把时间窗景背景强制换成 Cloudy。</param>
-        public static void Sync(EnvironmentType? targetPrecipitation, bool forceCloudy)
+        public static void Sync(EnvironmentType? targetPrecipitation, bool forceCloudy,
+                                DateTime localNow, bool timeSyncEnabled)
         {
             var windowService = Resolve<WindowViewService>();
             if (windowService == null)
@@ -125,12 +140,17 @@ namespace MyWeatherSyncMod
             // 从而决定要不要接管/交还窗景。
             _lastTarget = targetPrecipitation;
 
-            // ---- 关键：以场景真实状态为准，而不是插件自己的记忆 ----
-            EnvironmentType? actualPrecipitation = QueryActivePrecipitation(windowService);
+            var managedSound = ReadManaged(ConfigManager.ManagedSound);
+            if (managedSound.HasValue && managedSound != targetPrecipitation)
+                MuteManagedSound();
 
-            bool alreadyCorrect = (!actualPrecipitation.HasValue && !targetPrecipitation.HasValue)
-                || (actualPrecipitation.HasValue && targetPrecipitation.HasValue
-                    && actualPrecipitation.Value == targetPrecipitation.Value);
+            // ---- 关键：以场景真实状态为准，而不是插件自己的记忆 ----
+            bool alreadyCorrect;
+            bool expectVisual = targetPrecipitation.HasValue && ConfigManager.PreferFullWeather.Value;
+            EnvironmentType? actualPrecipitation = QueryActivePrecipitation(
+                windowService, targetPrecipitation, expectVisual, out alreadyCorrect);
+            if (!expectVisual && !actualPrecipitation.HasValue)
+                SaveManaged(ConfigManager.ManagedPrecipitation, null);
 
             if (alreadyCorrect)
             {
@@ -142,22 +162,61 @@ namespace MyWeatherSyncMod
                 if (targetPrecipitation.HasValue)
                     RefreshSounds(targetPrecipitation.Value);
 
-                RefreshBackground(windowService, forceCloudy);
+                RefreshBackground(windowService, forceCloudy, localNow, timeSyncEnabled);
                 return;
             }
 
             if (targetPrecipitation.HasValue)
             {
                 Plugin.Log.LogInfo($"[Apply] 激活降水窗景：{actualPrecipitation?.ToString() ?? "无"} → {targetPrecipitation.Value}");
-                DisableAllPrecipitation(windowService); // 先彻底清干净，避免雨+雪叠加
-                ActivatePrecipitation(windowService, targetPrecipitation.Value, forceCloudy);
+                if (!DisableAllPrecipitation(windowService))
+                {
+                    Plugin.Log.LogWarning("[Apply] 旧雨雪窗景未清理完成，暂不激活新窗景。");
+                    return;
+                }
+                ActivatePrecipitation(windowService, targetPrecipitation.Value,
+                                      forceCloudy, localNow, timeSyncEnabled);
             }
             else
             {
-                Plugin.Log.LogInfo($"[Apply] 当地无降水，关闭窗景：{actualPrecipitation.Value} → 无");
+                Plugin.Log.LogInfo($"[Apply] 当地无降水，关闭窗景：{actualPrecipitation?.ToString() ?? "无"} → 无");
                 DisableAllPrecipitation(windowService);
-                RefreshBackground(windowService, false); // 交回时间窗景（会自行判断是否该动）
+                RefreshBackground(windowService, false, localNow, timeSyncEnabled);
             }
+        }
+
+        /// <summary>停用天气同步时，只撤销本插件激活的雨雪与声音。</summary>
+        public static void StopWeatherSync()
+        {
+            var managedVisual = ReadManaged(ConfigManager.ManagedPrecipitation);
+            var windowService = Resolve<WindowViewService>();
+            if (managedVisual.HasValue && windowService != null)
+                DisableAllPrecipitation(windowService, managedVisual);
+            MuteManagedSound();
+            _lastTarget = null;
+            ReleaseWindow();
+        }
+
+        public static void ReleaseWindowControl()
+        {
+            ReleaseWindow();
+        }
+
+        /// <summary>天气同步关闭时，仍可独立同步时间窗景。</summary>
+        public static void SyncTimeOnly(DateTime localNow)
+        {
+            var windowService = Resolve<WindowViewService>();
+            if (windowService == null) return;
+            _lastTarget = null;
+            RefreshBackground(windowService, false, localNow, true);
+        }
+
+        /// <summary>使用上次天气数据定期推进时间窗景，不重新请求网络。</summary>
+        public static void RefreshClock(DateTime localNow, bool forceCloudy)
+        {
+            var windowService = Resolve<WindowViewService>();
+            if (windowService != null)
+                RefreshBackground(windowService, forceCloudy, localNow, true);
         }
 
         // ------------------------------------------------------------------
@@ -171,9 +230,13 @@ namespace MyWeatherSyncMod
         ///   · WindowViewService.IsActiveWindow  → 直接读 GameObject.activeSelf（画面真相）
         ///   · EnvironmentDataService.IsWindowActive → 存档字段（用户再次进游戏时会恢复它）
         /// </summary>
-        private static EnvironmentType? QueryActivePrecipitation(WindowViewService windowService)
+        private static EnvironmentType? QueryActivePrecipitation(
+            WindowViewService windowService, EnvironmentType? target, bool expectVisual,
+            out bool alreadyCorrect)
         {
             var dataService = Resolve<EnvironmentDataService>();
+            EnvironmentType? firstActive = null;
+            alreadyCorrect = true;
 
             foreach (var type in WeatherMapper.AllPrecipitation)
             {
@@ -193,24 +256,27 @@ namespace MyWeatherSyncMod
                     catch (Exception ex) { Plugin.Log.LogWarning($"[Apply] IsWindowActive({wvType}) 失败: {ex.Message}"); }
                 }
 
-                if (inScene != inSave)
+                if (dataService != null && inScene != inSave)
                     Plugin.Log.LogWarning($"[Apply] 状态不一致 {wvType}: 场景={inScene} 存档={inSave}（按“激活”处理并清理）");
 
-                if (inScene || inSave)
-                    return type;
+                bool expected = expectVisual && target.HasValue && type == target.Value;
+                if (inScene != expected || (dataService != null && inSave != expected))
+                    alreadyCorrect = false;
+                if ((inScene || inSave) && !firstActive.HasValue)
+                    firstActive = type;
             }
 
-            return null;
+            return firstActive;
         }
 
         // ------------------------------------------------------------------
         // 打开降水
         // ------------------------------------------------------------------
 
-        private static void ActivatePrecipitation(WindowViewService windowService, EnvironmentType weatherType, bool forceCloudy)
+        private static void ActivatePrecipitation(WindowViewService windowService, EnvironmentType weatherType,
+                                                  bool forceCloudy, DateTime localNow, bool timeSyncEnabled)
         {
-            // 注意：这里【不再】去动游戏的「自动时间窗景」开关（IsActiveAuto）。
-            // 那是玩家的设置，插件一改就是篡改用户偏好；时间窗景由 ApplyTimeWindow 自己负责。
+            // 自动时间窗景的接管由 RefreshBackground 统一处理。
 
             WindowViewType wvType;
             if (!weatherType.TryConvertToWindowViewType(out wvType))
@@ -223,7 +289,7 @@ namespace MyWeatherSyncMod
             {
                 Plugin.Log.LogInfo("[Apply] PreferFullWeather=false，只保留背景与声音，不激活降水窗景视觉。");
                 RefreshSounds(weatherType);
-                RefreshBackground(windowService, forceCloudy);
+                RefreshBackground(windowService, forceCloudy, localNow, timeSyncEnabled);
                 return;
             }
 
@@ -239,6 +305,7 @@ namespace MyWeatherSyncMod
                 else
                     windowService.ActivateWindow(wvType); // 兜底
 
+                SaveManaged(ConfigManager.ManagedPrecipitation, weatherType);
                 Plugin.Log.LogInfo($"[Apply] 降水窗景已激活：{wvType}");
             }
             catch (Exception ex)
@@ -247,7 +314,7 @@ namespace MyWeatherSyncMod
             }
 
             RefreshSounds(weatherType);
-            RefreshBackground(windowService, forceCloudy);
+            RefreshBackground(windowService, forceCloudy, localNow, timeSyncEnabled);
         }
 
         // ------------------------------------------------------------------
@@ -255,13 +322,15 @@ namespace MyWeatherSyncMod
         // ------------------------------------------------------------------
 
         /// <summary>关闭全部降水窗景（存档 + 场景两边都清）。</summary>
-        private static void DisableAllPrecipitation(WindowViewService windowService)
+        private static bool DisableAllPrecipitation(WindowViewService windowService, EnvironmentType? onlyType = null)
         {
             var dataService = Resolve<EnvironmentDataService>();
             var appService = Resolve<EnvironmentApplicationService>();
+            bool allCleared = true;
 
             foreach (var type in WeatherMapper.AllPrecipitation)
             {
+                if (onlyType.HasValue && type != onlyType.Value) continue;
                 WindowViewType wvType;
                 if (!type.TryConvertToWindowViewType(out wvType))
                     continue;
@@ -279,7 +348,11 @@ namespace MyWeatherSyncMod
                 if (dataService != null)
                 {
                     try { dataService.SetViewActive(wvType, false); }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[Apply] 清除存档标记 {wvType} 失败: {ex.Message}"); }
+                    catch (Exception ex)
+                    {
+                        allCleared = false;
+                        Plugin.Log.LogWarning($"[Apply] 清除存档标记 {wvType} 失败: {ex.Message}");
+                    }
                 }
 
                 // ② 关掉场景里的雨雪 GameObject（真正的画面开关）
@@ -295,6 +368,7 @@ namespace MyWeatherSyncMod
                     try { windowService.DeactivateWindow(wvType); sceneClosed = true; }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[Apply] DeactivateWindow 兜底失败: {ex.Message}"); }
                 }
+                if (!sceneClosed) allCleared = false;
 
                 // ③ UI 版控制器（面板打开时存在），保证图标状态同步
                 foreach (var ctrl in FindControllers())
@@ -306,7 +380,10 @@ namespace MyWeatherSyncMod
                 Plugin.Log.LogInfo($"[Apply] 已关闭 {wvType}（场景关闭={sceneClosed}）");
             }
 
-            MuteAllPrecipitationSounds();
+            MuteAllPrecipitationSounds(onlyType);
+            if (allCleared)
+                SaveManaged(ConfigManager.ManagedPrecipitation, null);
+            return allCleared;
         }
 
         // ------------------------------------------------------------------
@@ -321,39 +398,44 @@ namespace MyWeatherSyncMod
         ///
         /// 铁律：当前窗景是玩家自定义的（烟花/樱花/深海…）时绝不覆盖，直接不动。
         /// </summary>
-        private static void RefreshBackground(WindowViewService windowService, bool forceCloudy)
+        private static void RefreshBackground(WindowViewService windowService, bool forceCloudy,
+                                              DateTime localNow, bool timeSyncEnabled)
         {
             bool precipitating = _lastTarget.HasValue;
 
             try
             {
+                // 异地时间或降水期间需暂停游戏按电脑时钟执行的自动切换。
+                bool remoteClock = Math.Abs((localNow - DateTime.Now).TotalMinutes) > 30.0;
+                bool needsTakeover = timeSyncEnabled && (precipitating || remoteClock);
+                bool gameManagesTime = false;
+                if (!needsTakeover)
+                    gameManagesTime = ReleaseWindow();
+                if (!timeSyncEnabled || gameManagesTime) return;
+
                 // 玩家自己选的窗景（非时间类）→ 无论如何都不碰，也不需要接管
                 if (!IsTimeWindowActive(windowService))
                 {
+                    if (precipitating) ReleaseWindow();
                     LogBackgroundOnce("保留自定义窗景",
                         "[Apply] 当前是玩家自定义窗景（烟花/樱花等），不覆盖，只处理雨雪。");
                     return;
                 }
 
-                if (precipitating)
-                {
-                    // ---- 降水期间：必须接管，否则游戏每 0.2 秒覆盖一次 ----
-                    TakeOverWindow();
-                }
-                else
-                {
-                    // ---- 无降水：先交还，再按时间/设置刷新 ----
-                    if (!ReleaseWindow()) return; // 交还后仍由游戏托管则不必再动
-                }
-
                 // 时间窗景是要解锁的（夜晚需先解锁），没解锁就不要强开
-                var target = forceCloudy ? WindowViewType.Cloudy : GetWindowViewTypeForNow();
+                var target = forceCloudy ? WindowViewType.Cloudy : GetWindowViewTypeForNow(localNow);
                 if (!IsWindowUnlocked(target))
                 {
                     LogBackgroundOnce("未解锁-" + target,
                         $"[Apply] 时间窗景 {target} 尚未解锁，保持当前窗景。");
                     return;
                 }
+
+                if (needsTakeover)
+                    TakeOverWindow();
+
+                if (GetActiveTimeWindow(windowService) == target)
+                    return;
 
                 if (forceCloudy)
                 {
@@ -375,7 +457,7 @@ namespace MyWeatherSyncMod
                     windowService.ChangeWeatherAndTime(target);
                     LogBackgroundOnce("时间-" + target,
                         $"[Apply] 背景跟随真实时间：{cur} → {target}" +
-                        $"（当前 {DateTime.Now:HH:mm}，时段边界 白天/傍晚/夜晚 = " +
+                        $"（当地当前 {localNow:HH:mm}，时段边界 白天/傍晚/夜晚 = " +
                         $"{FormatHour(GetTimeNode(t => t.TimeDayStart))}/" +
                         $"{FormatHour(GetTimeNode(t => t.TimeSunsetStart))}/" +
                         $"{FormatHour(GetTimeNode(t => t.TimeNightStart))}）。");
@@ -407,12 +489,12 @@ namespace MyWeatherSyncMod
             WeatherTookOverWindow = true;
             EnsureAutoTimeOff();
             Plugin.Log.LogInfo(
-                $"[Apply] 降水期间接管窗景（玩家原本的自动时间窗景 = " +
-                $"{(AutoTimeWasOnBeforeRain ? "开" : "关")}，暂关以免背景被游戏覆盖，降水结束会原样还原）。");
+                $"[Apply] 临时接管时间窗景（玩家原本的自动时间窗景 = " +
+                $"{(AutoTimeWasOnBeforeRain ? "开" : "关")}，结束后会原样还原）。");
         }
 
         /// <summary>
-        /// 降水结束时调用：把「自动时间窗景」还原成玩家原本的设置。
+        /// 不再需要接管时，把「自动时间窗景」还原成玩家原本的设置。
         /// </summary>
         /// <returns>true 表示窗景已交还给游戏托管，调用方不必再手动设置窗景。</returns>
         private static bool ReleaseWindow()
@@ -421,10 +503,10 @@ namespace MyWeatherSyncMod
                 return false; // 本来就没接管，交给调用方按时间刷新
 
             bool restoreTo = AutoTimeWasOnBeforeRain;
+            if (!SetAutoTime(restoreTo))
+                return true; // 失败时保留接管标记，下轮继续尝试
             WeatherTookOverWindow = false;
-
-            SetAutoTime(restoreTo);
-            Plugin.Log.LogInfo($"[Apply] 降水结束，已把「自动时间窗景」还原为 {(restoreTo ? "开" : "关")}。");
+            Plugin.Log.LogInfo($"[Apply] 已把「自动时间窗景」还原为 {(restoreTo ? "开" : "关")}。");
 
             // 还原成"开"时，游戏的 ApplyTimeOfDayFromCurrentTime() 会自行把窗景拉回当前时段
             return restoreTo;
@@ -443,31 +525,45 @@ namespace MyWeatherSyncMod
             SetAutoTime(false);
         }
 
-        private static void SetAutoTime(bool enabled)
+        private static bool SetAutoTime(bool enabled)
         {
             try
             {
                 var sd = SaveDataManager.Instance;
-                if (sd.AutoTimeWindowChangeData.IsActiveAuto.Value == enabled) return;
+                if (sd.AutoTimeWindowChangeData.IsActiveAuto.Value == enabled) return true;
                 sd.AutoTimeWindowChangeData.IsActiveAuto.Value = enabled;
                 sd.SaveAutoTimeWindowChangeData();
+                return true;
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[Apply] 切换自动时间窗景失败: {ex.Message}");
+                return false;
             }
         }
 
         /// <summary>
-        /// 当前激活的是不是「时间类」窗景（Day/Sunset/Night/Cloudy）。
-        /// 这四者是互斥的一类，其余（烟花/樱花/深海…）都是玩家自定义窗景。
+        /// 当前是否只有时间背景、没有玩家自定义窗景。
+        /// 游戏的时间背景和樱花/烟花等是不同 GameObject，可能同时激活。
         /// </summary>
         private static bool IsTimeWindowActive(WindowViewService windowService)
         {
+            foreach (var type in AllWindowTypes)
+            {
+                if (type.IsTimeType() || IsPrecipitationWindow(type)) continue;
+                try { if (windowService.IsActiveWindow(type)) return false; }
+                catch { }
+            }
             return GetActiveTimeWindow(windowService) != null;
         }
 
-        /// <summary>返回当前激活的时间类窗景；若当前是自定义窗景则返回 null。</summary>
+        private static bool IsPrecipitationWindow(WindowViewType type)
+        {
+            return type == WindowViewType.Snow || type == WindowViewType.LightRain ||
+                   type == WindowViewType.HeavyRain || type == WindowViewType.ThunderRain;
+        }
+
+        /// <summary>返回当前激活的时间背景；自定义效果需单独检查。</summary>
         private static WindowViewType? GetActiveTimeWindow(WindowViewService windowService)
         {
             foreach (var t in TimeWindowTypes)
@@ -502,15 +598,18 @@ namespace MyWeatherSyncMod
             WindowViewType.Cloudy,
         };
 
+        private static readonly WindowViewType[] AllWindowTypes =
+            (WindowViewType[])Enum.GetValues(typeof(WindowViewType));
+
         /// <summary>
         /// 按存档里的时间节点 + 真实时钟算出当前该用哪个时间窗景。
         /// 不使用 AutoTimeWindowViewChanger.ApplyTimeOfDayFromCurrentTime()：
         /// 那个方法第一行就是 `if (!IsActiveAuto) return;`，玩家关掉自动时间时它无效。
         /// </summary>
-        private static WindowViewType GetWindowViewTypeForNow()
+        private static WindowViewType GetWindowViewTypeForNow(DateTime localNow)
         {
             var td = SaveDataManager.Instance.AutoTimeWindowChangeData;
-            float now = DateTime.Now.Hour + DateTime.Now.Minute / 60f + DateTime.Now.Second / 3600f;
+            float now = localNow.Hour + localNow.Minute / 60f + localNow.Second / 3600f;
             var settings = new AutoTimeWindowSettings(td.TimeDayStart, td.TimeSunsetStart, td.TimeNightStart, 10);
             return settings.GetWindowViewTypeFromTime(now);
         }
@@ -555,12 +654,14 @@ namespace MyWeatherSyncMod
                 return;
 
             var dataService = Resolve<EnvironmentDataService>();
+            bool dataApplied = false;
             if (dataService != null)
             {
                 try
                 {
                     dataService.SetVolume(soundType, 0.5f);
                     dataService.SetMute(soundType, false);
+                    dataApplied = true;
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[Apply] 设置声音失败: {ex.Message}"); }
             }
@@ -578,18 +679,30 @@ namespace MyWeatherSyncMod
                 catch { }
             }
 
+            if (dataApplied || applied)
+                SaveManaged(ConfigManager.ManagedSound, weatherType);
+
             Plugin.Log.LogInfo(applied
                 ? "[Apply] 环境音已激活（直接控制控制器）。"
                 : "[Apply] 未找到匹配的控制器，声音将在面板打开时播放。");
         }
 
-        private static void MuteAllPrecipitationSounds()
+        private static void MuteManagedSound()
+        {
+            var managed = ReadManaged(ConfigManager.ManagedSound);
+            if (!managed.HasValue) return;
+            MuteAllPrecipitationSounds(managed);
+            SaveManaged(ConfigManager.ManagedSound, null);
+        }
+
+        private static void MuteAllPrecipitationSounds(EnvironmentType? onlyType = null)
         {
             var dataService = Resolve<EnvironmentDataService>();
             var controllers = FindControllers();
 
             foreach (var type in WeatherMapper.AllPrecipitation)
             {
+                if (onlyType.HasValue && type != onlyType.Value) continue;
                 AmbientSoundType soundType;
                 if (type.TryConvertToAmbientSoundType(out soundType) && dataService != null)
                 {
@@ -616,7 +729,16 @@ namespace MyWeatherSyncMod
 
         private static EnvironmentController[] FindControllers()
         {
-            try { return Resources.FindObjectsOfTypeAll<EnvironmentController>(); }
+            try
+            {
+                var live = new List<EnvironmentController>();
+                foreach (var ctrl in Resources.FindObjectsOfTypeAll<EnvironmentController>())
+                {
+                    if (ctrl != null && ctrl.gameObject != null && ctrl.gameObject.scene.IsValid())
+                        live.Add(ctrl);
+                }
+                return live.ToArray();
+            }
             catch { return new EnvironmentController[0]; }
         }
 
@@ -627,7 +749,5 @@ namespace MyWeatherSyncMod
             catch { return null; }
         }
 
-        // 说明：这里刻意【没有】读写游戏「自动时间窗景」开关(IsActiveAuto) 的方法。
-        // 那个开关属于玩家设置，插件不碰；时间窗景由 GetWindowViewTypeForNow() 自行计算。
     }
 }

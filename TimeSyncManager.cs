@@ -15,9 +15,9 @@ namespace MyWeatherSyncMod
 
     public static class TimeSyncManager
     {
-        public static TimeOfDay GetTimeOfDay(DateTime sunrise, DateTime sunset)
+        public static TimeOfDay GetTimeOfDay(DateTime sunrise, DateTime sunset, DateTime localNow)
         {
-            var now = DateTime.Now;
+            var now = localNow;
             if (now < sunrise.AddHours(-1)) return TimeOfDay.LateNight;
             if (now < sunrise.AddHours(2)) return TimeOfDay.Morning;
             if (now < sunset.AddHours(-3)) return TimeOfDay.Day;
